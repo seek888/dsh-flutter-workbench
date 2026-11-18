@@ -691,6 +691,18 @@ export function createHttpApi(options = {}) {
     }
   })
 
+  route('POST', '/logs/mark', async ({ body }) => {
+    // Time-correlation marker: the panel and the flutter_log_mark tool both use
+    // it, then read the slice with GET /logs?since=<seq>.
+    const payload = isPlainObject(body) ? body : {}
+    const entry = require('logs').mark(text(payload.text))
+    return {
+      status: 200,
+      headers: {},
+      body: { ok: true, seq: Number.isFinite(Number(entry?.seq)) ? Number(entry.seq) : null },
+    }
+  })
+
   route('GET', '/errors', async ({ query }) => {
     const result = await require('errors').query({
       since: query.int('since', 0, { min: 0 }),

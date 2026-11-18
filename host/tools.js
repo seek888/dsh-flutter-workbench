@@ -92,8 +92,8 @@ export function createToolDefinitions({ services, logger } = {}) {
     },
     output: {
       schema: looseSchema({
-        project: { type: ['object', 'null'] },
-        run: { type: ['object', 'null'] },
+        project: {},
+        run: {},
         counters: { type: 'object' },
         board: { type: 'object' },
       }),
@@ -153,7 +153,7 @@ export function createToolDefinitions({ services, logger } = {}) {
       additionalProperties: false,
     },
     output: {
-      schema: looseSchema({ projects: { type: 'array', items: { type: 'object' } }, activeProjectId: { type: ['string', 'null'] } }),
+      schema: looseSchema({ projects: { type: 'array', items: { type: 'object' } }, activeProjectId: {} }),
       render: (args, value) => {
         const list = value?.projects ?? []
         if (list.length === 0) return text('还没有项目')
