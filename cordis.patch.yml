@@ -1,0 +1,14 @@
+# dsh-flutter-workbench bundle patch: one Host row.
+#
+# Every user-tunable value also lives in the plugin's own settings store, edited
+# from the panel. Values here only seed the first run; the user's profile patch
+# layer overrides them and survives upgrades.
+- insert:
+    - id: flutter-workbench
+      name: 'dsh-flutter-workbench'
+      config:
+        flutterPath: ''
+        dartPath: ''
+        logCapacity: 4000
+        autoStart: false
+        dataDir: ''

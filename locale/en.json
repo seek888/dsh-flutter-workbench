@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Flutter workbench",
+    "description": "Run Flutter projects inside DSH: hot reload and restart, live logs, network inspector, AI/MCP log access, and an agent-driven kanban board."
+  }
+}

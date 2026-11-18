@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Flutter workbench">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0f2a3f"/>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="#2f6f8f" stroke-width="2"/>
+  <path d="M14 22l10 10-10 10" fill="none" stroke="#5ad2f4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M28 42h18" fill="none" stroke="#7ee2a8" stroke-width="4" stroke-linecap="round"/>
+  <path d="M40 14l8 8-8 8" fill="none" stroke="#ffd166" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

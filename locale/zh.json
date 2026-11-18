@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Flutter 客户端工作台",
+    "description": "在 DSH 里直接运行 Flutter 项目：热重载与热重启、实时日志、网络请求检查、AI/MCP 日志查询，以及由 AI 驱动的看板任务。"
+  }
+}

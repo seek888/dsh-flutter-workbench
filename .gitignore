@@ -1,0 +1,13 @@
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# Local plugin state (never committed: it holds machine paths and tokens)
+.flutter-workbench/
+*.local.json
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

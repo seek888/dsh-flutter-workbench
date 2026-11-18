@@ -1,0 +1,60 @@
+{
+  "name": "dsh-flutter-workbench",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Flutter client-dev workbench for DeepSeek Harness: run projects, hot reload, live logs, network inspector, AI/MCP log access and an agent-driven kanban board.",
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "host",
+    "client/client.js",
+    "cordis.patch.yml",
+    "locale/en.json",
+    "locale/zh.json",
+    "icon.svg",
+    "README.md",
+    "docs"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "flutter",
+    "dart",
+    "hot-reload",
+    "vm-service",
+    "mcp",
+    "kanban"
+  ],
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "check": "node --check index.js && node scripts/check-all.mjs",
+    "test": "node --test test/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}
