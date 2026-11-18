@@ -17,8 +17,17 @@ window.__ModuleLoader__.load({
     /* ==== 00-prelude.js ==== */
 /* ====================================================================== *
  * 00-prelude.js — owner: dev-ui-core
- * Tokens, i18n, HTTP client, polling hooks and the shared UI kit.
- * PLACEHOLDER: replace with the real implementation per docs/CONTRACTS.md §8.1.
+ *
+ * Design tokens, i18n dictionaries, the HTTP client, polling hooks and the
+ * shared UI kit. Everything below is a plain declaration in the single
+ * factory scope produced by `scripts/build-client.mjs`, so no module syntax.
+ *
+ * Rules honoured here (docs/CONTRACTS.md §1, §8.1):
+ *  - colours / radii only through `--dsw-alias-*` / `--dsw-radius-*` tokens;
+ *  - every user-visible string comes from `t()`, with a `zh` and an `en` entry;
+ *  - `api()` throws `{ status, code, message, body }` and never resolves a
+ *    non-ok body as success;
+ *  - components are plain functions: props in, `h()` out.
  * ====================================================================== */
 
 const h = React.createElement
@@ -26,54 +35,1009 @@ const PANEL_ID = 'flutter-workbench'
 const API = '/api/flutter-workbench'
 const LOCALE_NS = 'flutter-workbench'
 
-/** Design tokens — only host theme tokens, never literal colors. */
+/** Log vocabulary — mirrors host/logs.js. */
+const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal']
+const SOURCES = ['flutter', 'stdout', 'stderr', 'daemon', 'vm', 'network', 'toolchain', 'plugin', 'ai']
+/** RunState.phase values — mirrors CONTRACTS §4. */
+const PHASES = ['starting', 'running', 'reloading', 'restarting', 'stopping', 'stopped', 'failed', 'exited']
+/** Kanban lanes — mirrors CONTRACTS §4. */
+const LANES = ['backlog', 'ready', 'running', 'review', 'verify', 'done']
+
+/* ====================================================================== *
+ * Design tokens
+ * ====================================================================== */
+
+/**
+ * Theme tokens. The first block is the contract surface (§8.1) so pages can
+ * rely on the names; the second block is a richer alias set.
+ * No literal colour, gradient or radius appears here.
+ */
 const T = {
-  bg: 'transparent',
-  bgRaised: 'var(--dsw-alias-bg-raised, var(--dsw-alias-bg-base))',
-  bgInput: 'var(--dsw-alias-bg-input, var(--dsw-alias-bg-raised))',
-  border: 'var(--dsw-alias-border-subtle, rgba(127,127,127,0.24))',
-  borderStrong: 'var(--dsw-alias-border-strong, rgba(127,127,127,0.4))',
-  text: 'var(--dsw-alias-text-primary)',
-  textDim: 'var(--dsw-alias-text-secondary)',
-  textFaint: 'var(--dsw-alias-text-tertiary, var(--dsw-alias-text-secondary))',
-  brand: 'var(--dsw-alias-brand-primary)',
-  ok: 'var(--dsw-alias-state-success, #3fb950)',
-  warn: 'var(--dsw-alias-state-warning, #d29922)',
-  error: 'var(--dsw-alias-state-error, #f85149)',
-  radius: 'var(--dsw-radius-lg, 10px)',
-  radiusSm: 'var(--dsw-radius-md, 6px)',
-  font: 'var(--dsw-alias-font-family, system-ui, sans-serif)',
-  mono: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  /* --- §8.1 canonical names ------------------------------------------- */
+  bg: 'var(--dsw-alias-bg-base)',
+  bgRaised: 'var(--dsw-alias-bg-layer-1)',
+  bgInput: 'var(--dsw-alias-bg-input, var(--dsw-alias-bg-layer-2))',
+  border: 'var(--dsw-alias-border-l1)',
+  borderStrong: 'var(--dsw-alias-border-l3)',
+  text: 'var(--dsw-alias-label-primary)',
+  textDim: 'var(--dsw-alias-label-secondary)',
+  textFaint: 'var(--dsw-alias-label-tertiary)',
+  brand: 'var(--dsw-alias-state-business-primary)',
+  brandText: 'var(--dsw-alias-label-primary-foreground)',
+  ok: 'var(--dsw-alias-state-success-primary)',
+  warn: 'var(--dsw-alias-state-warn-primary)',
+  error: 'var(--dsw-alias-state-error-primary)',
+  radius: 'var(--dsw-radius-lg)',
+  radiusSm: 'var(--dsw-radius-sm)',
+  font: 'var(--dsw-font-family, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif)',
+  mono: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono", monospace',
+
+  /* --- richer aliases (all host tokens) -------------------------------- */
+  l1: 'var(--dsw-alias-bg-layer-1)',
+  l2: 'var(--dsw-alias-bg-layer-2)',
+  l3: 'var(--dsw-alias-bg-layer-3)',
+  overlay: 'var(--dsw-alias-bg-overlay)',
+  hover: 'var(--dsw-alias-interactive-bg-hover)',
+  active: 'var(--dsw-alias-interactive-bg-active)',
+  selected: 'var(--dsw-alias-button-ghost-active-fill)',
+  link: 'var(--dsw-alias-link)',
+  btn: 'var(--dsw-alias-button-primary-fill)',
+  btnFg: 'var(--dsw-alias-label-primary-foreground)',
+  tag: 'var(--dsw-alias-markdown-tag)',
+  code: 'var(--dsw-alias-markdown-code-block)',
+  inlineCode: 'var(--dsw-alias-markdown-inline-code)',
+  warnLabel: 'var(--dsw-alias-state-warn-label)',
+  done: 'var(--dsw-alias-state-done-primary)',
+  idle: 'var(--dsw-alias-state-idle-primary)',
+  skeleton: 'var(--dsw-alias-bg-skeleton)',
+  scrollbar: 'var(--dsw-alias-scrollbar-bg-l2)',
+  toastBg: 'var(--dsw-alias-toast-bg)',
+  toastFg: 'var(--dsw-alias-toast-label)',
+  shadow: 'var(--dsw-alias-shadow-overlay, var(--dsw-shadow-overlay, none))',
+
+  /* --- radii beyond the two contract names ----------------------------- */
+  radiusXs: 'var(--dsw-radius-xs)',
+  radiusMd: 'var(--dsw-radius-md)',
+
+  /* --- metrics (plain numbers: layout, not color) ---------------------- */
   fs: 13,
+  fsXs: 11,
+  fsSm: 12,
+  fsMd: 14,
+  fsLg: 16,
+  fsXl: 18,
+  spacing: { xs: 4, sm: 6, md: 10, lg: 14, xl: 20 },
+  row: 22,
 }
 
+/** Body text style, reused by most kit primitives. */
+const TEXT_STYLE = {
+  fontFamily: T.font,
+  fontSize: T.fs,
+  lineHeight: '20px',
+  color: T.text,
+}
+
+/* ====================================================================== *
+ * Locale dictionaries
+ *
+ * `ZH` / `EN` are plain mutable objects on purpose: sibling fragments may
+ * `Object.assign` their own keys at load time, and 90-apply registers these
+ * very objects with `ctx.locale.register(LOCALE_NS, { zh: ZH, en: EN })`.
+ * Key namespaces: common.*, nav.*, shell.*, phase.*, device.*, run.*,
+ * runtime.*, logs.*, net.*, board.*, quality.*, settings.*, state.*, boot.*
+ * ====================================================================== */
+
 const ZH = {
+  /* ---- common -------------------------------------------------------- */
+  'common.ok': '确定',
+  'common.cancel': '取消',
+  'common.close': '关闭',
+  'common.save': '保存',
+  'common.saved': '已保存',
+  'common.reset': '重置',
+  'common.delete': '删除',
+  'common.edit': '编辑',
+  'common.copy': '复制',
+  'common.copied': '已复制',
+  'common.copyFailed': '复制失败',
+  'common.refresh': '刷新',
+  'common.retry': '重试',
+  'common.loading': '加载中…',
+  'common.empty': '暂无数据',
+  'common.search': '搜索',
+  'common.all': '全部',
+  'common.none': '无',
+  'common.yes': '是',
+  'common.no': '否',
+  'common.add': '添加',
+  'common.remove': '移除',
+  'common.create': '新建',
+  'common.open': '打开',
+  'common.export': '导出',
+  'common.clear': '清空',
+  'common.apply': '应用',
+  'common.unknown': '未知',
+  'common.details': '详情',
+  'common.more': '更多',
+  'common.collapse': '收起',
+  'common.expand': '展开',
+  'common.count': '共 {n} 条',
+  'common.never': '从未',
+  'common.enabled': '启用',
+  'common.disabled': '已停用',
+  'common.error': '出错了',
+  'common.actionFailed': '操作失败：{message}',
+  'common.required': '必填',
+  'common.optional': '可选',
+  'common.current': '当前',
+  'common.total': '总计',
+  'common.time': '时间',
+  'common.status': '状态',
+  'common.name': '名称',
+  'common.path': '路径',
+  'common.source': '来源',
+  'common.level': '级别',
+  'common.message': '消息',
+  'common.run': '运行',
+  'common.actions': '操作',
+  'common.filters': '筛选',
+  'common.confirm': '确认',
+  'common.select': '选择',
+  'common.noneSelected': '未选择',
+  'common.start': '开始',
+  'common.stop': '停止',
+  'common.duration': '耗时',
+  'common.size': '大小',
+  'common.type': '类型',
+  'common.value': '值',
+  'common.key': '键',
+  'common.id': 'ID',
+  'common.download': '下载',
+  'common.secondsAgo': '{n} 秒前',
+  'common.minutesAgo': '{n} 分钟前',
+  'common.hoursAgo': '{n} 小时前',
+  'common.justNow': '刚刚',
+  'common.notAvailable': '—',
+
+  /* ---- nav ----------------------------------------------------------- */
   'nav.runtime': '运行',
   'nav.logs': '日志',
   'nav.network': '网络',
   'nav.board': '看板',
   'nav.quality': '质量',
   'nav.settings': '设置',
-  'common.loading': '加载中…',
-  'common.empty': '暂无数据',
-  'common.refresh': '刷新',
-  'common.retry': '重试',
+  'nav.section': '工作台',
+
+  /* ---- shell --------------------------------------------------------- */
+  'shell.title': 'Flutter 工作台',
+  'shell.subtitle': '客户端开发',
+  'shell.noProject': '未添加项目',
+  'shell.projectPlaceholder': '选择项目…',
+  'shell.addProject': '添加项目',
+  'shell.addProjectTitle': '添加 Flutter 项目',
+  'shell.addProjectHint': '项目根目录（含 pubspec.yaml）的绝对路径',
+  'shell.addProjectPlaceholder': 'C:\\work\\my_app',
+  'shell.addProjectEmpty': '请填写项目路径',
+  'shell.removeProject': '从工作台移除',
+  'shell.removeProjectConfirm': '从工作台移除「{name}」？磁盘文件不受影响。',
+  'shell.projectAdded': '已添加项目：{name}',
+  'shell.projectRemoved': '已移除项目',
+  'shell.connected': '已连接',
+  'shell.disconnected': '未连接',
+  'shell.offlineTitle': '无法连接工作台后端',
+  'shell.offlineBody': '请确认插件已启用，然后重试。{message}',
+  'shell.palette': '命令面板',
+  'shell.palettePlaceholder': '搜索页面或命令…',
+  'shell.paletteEmpty': '没有匹配的命令',
+  'shell.palettePages': '页面',
+  'shell.paletteActions': '命令',
+  'shell.paletteHint': '↑↓ 选择 · Enter 执行 · Esc 关闭',
+  'shell.hintPalette': 'Ctrl/⌘ K 命令面板',
+  'shell.hintRefreshLogs': 'R 刷新日志',
+  'shell.hintEsc': 'Esc 关闭',
+  'shell.logsCount': '{n} 条日志',
+  'shell.errorsCount': '{n} 个异常',
+  'shell.runId': '运行 {id}',
+  'shell.noRun': '没有运行中的项目',
+  'shell.devtools': 'DevTools',
+  'shell.vmUri': 'VM 服务',
+  'shell.copyVmUri': '复制 VM 地址',
+  'shell.vmUriMissing': '还没有 VM 地址',
+  'shell.device': '设备',
+  'shell.deviceMissing': '未检测到设备',
+  'shell.pausePolling': '暂停轮询',
+  'shell.resumePolling': '继续轮询',
+  'shell.paused': '轮询已暂停',
+  'shell.locale': '语言',
+  'shell.switchLocale': '切换到英文',
+  'shell.fallbackTitle': '{page} 尚未加载',
+  'shell.fallbackBody': '该页面模块还没有注册到客户端包里，运行 node scripts/build-client.mjs 重新构建。',
+  'shell.counters': '计数',
+  'shell.errorBoundary': '页面渲染失败：{message}',
+
+  /* ---- phases -------------------------------------------------------- */
+  'phase.starting': '启动中',
+  'phase.running': '运行中',
+  'phase.reloading': '热重载中',
+  'phase.restarting': '热重启中',
+  'phase.stopping': '停止中',
+  'phase.stopped': '已停止',
+  'phase.failed': '失败',
+  'phase.exited': '已退出',
+  'phase.idle': '空闲',
+
+  /* ---- devices ------------------------------------------------------- */
+  'device.device': '设备',
+  'device.emulator': '模拟器',
+  'device.none': '没有可用设备',
+  'device.refresh': '刷新设备',
+  'device.select': '选择设备',
+  'device.platform': '平台',
+
+  /* ---- run ----------------------------------------------------------- */
+  'run.active': '当前运行',
+  'run.recent': '最近运行',
+  'run.empty': '还没有运行记录',
+  'run.noActiveTitle': '还没有运行',
+  'run.noActiveBody': '选择启动配置，然后点「启动」。',
+  'run.id': '运行 ID',
+  'run.phase': '阶段',
+  'run.exitCode': '退出码',
+  'run.pid': '进程 PID',
+  'run.startedAt': '启动时间',
+  'run.finishedAt': '结束时间',
+  'run.duration': '已运行',
+  'run.hotReloads': '热重载',
+  'run.hotRestarts': '热重启',
+  'run.vmService': 'VM Service',
+  'run.httpUri': 'HTTP 地址',
+  'run.devtools': 'DevTools',
+  'run.appId': '应用 ID',
+  'run.device': '设备',
+  'run.project': '项目',
+  'run.program': '入口',
+  'run.error': '错误',
+  'run.count': '{n} 次',
+
+  /* ---- runtime page -------------------------------------------------- */
+  'runtime.title': '运行',
+  'runtime.subtitle': '选择项目、配置与设备，然后启动、热重载或热重启。',
+  'runtime.controls': '运行控制',
+  'runtime.project': '项目',
+  'runtime.projectHint': '项目根目录来自工作台项目列表',
+  'runtime.config': '启动配置',
+  'runtime.configEmpty': '没有找到启动配置',
+  'runtime.configEmptyHint': '在工作台添加项目，或检查 .vscode/launch.json 与 lib/main.dart。',
+  'runtime.configSourceLaunch': 'launch.json',
+  'runtime.configSourceEntry': '入口文件',
+  'runtime.configSourceManual': '手动',
+  'runtime.configManual': '手动配置',
+  'runtime.device': '设备',
+  'runtime.deviceRefresh': '刷新设备',
+  'runtime.mode': '模式',
+  'runtime.flavor': 'Flavor',
+  'runtime.flavorHint': '可选，例如 dev / prod',
+  'runtime.dartDefines': 'Dart defines',
+  'runtime.dartDefinesEmpty': '还没有 define',
+  'runtime.addDefine': '添加 define',
+  'runtime.defineKey': '键（如 API_URL）',
+  'runtime.defineValue': '值',
+  'runtime.args': '额外参数',
+  'runtime.argsHint': '空格分隔，例如 --dart-define-from-file=env.json',
+  'runtime.program': '入口文件',
+  'runtime.programHint': '默认 lib/main.dart',
+  'runtime.start': '启动',
+  'runtime.stop': '停止',
+  'runtime.reload': '热重载',
+  'runtime.restart': '热重启',
+  'runtime.starting': '启动中…',
+  'runtime.stopping': '停止中…',
+  'runtime.reloading': '热重载中…',
+  'runtime.restarting': '热重启中…',
+  'runtime.started': '已启动运行 {id}',
+  'runtime.stopped': '已停止 {n} 个运行',
+  'runtime.reloaded': '热重载完成',
+  'runtime.restarted': '热重启完成',
+  'runtime.startFailed': '启动失败：{message}',
+  'runtime.stopFailed': '停止失败：{message}',
+  'runtime.reloadFailed': '热重载失败：{message}',
+  'runtime.restartFailed': '热重启失败：{message}',
+  'runtime.noProject': '先在工作台添加并选择一个项目',
+  'runtime.noDevice': '没有可用设备，请先启动模拟器或连接真机',
+  'runtime.launchFile': 'launch.json：{path}',
+  'runtime.launchFileNone': '没有 launch.json，使用入口文件配置',
+  'runtime.warnings': '配置警告',
+  'runtime.refreshConfigs': '重新扫描配置',
+  'runtime.configLoadFailed': '读取配置失败：{message}',
+  'runtime.pendingHint': '正在{phase}…',
+  'runtime.openDevtools': '打开 DevTools',
+  'runtime.copyUri': '复制地址',
+  'runtime.devtoolsNeedsRun': '先在运行中的应用上取到 VM 地址，才能打开 DevTools。',
+  'runtime.recentEmpty': '还没有运行记录，启动一次即可看到摘要',
+  'runtime.definesCount': '{n} 个 define',
+  'runtime.deviceCount': '{n} 个设备',
+  'runtime.modeDebugHint': 'debug：断言开启、VM Service 可用',
+  'runtime.modeProfileHint': 'profile：性能分析，部分调试能力关闭',
+  'runtime.modeReleaseHint': 'release：发布构建，无热重载',
+
+  /* ---- logs page ----------------------------------------------------- */
+  'logs.title': '日志',
+  'logs.follow': '跟随',
+  'logs.followOn': '跟随中',
+  'logs.followPaused': '已暂停',
+  'logs.searchPlaceholder': '搜索文本或正则…',
+  'logs.regexInvalid': '无效正则：{message}',
+  'logs.levels': '级别',
+  'logs.sources': '来源',
+  'logs.emptyTitle': '还没有日志',
+  'logs.emptyBody': '启动一次运行，或放宽筛选条件。',
+  'logs.noMatch': '没有匹配当前筛选的日志',
+  'logs.showing': '显示 {shown} / 共 {total} 条',
+  'logs.newLines': '{n} 条新日志',
+  'logs.jumpToBottom': '跳到最新',
+  'logs.copyAll': '复制全部',
+  'logs.copyAllDone': '已复制 {n} 条日志',
+  'logs.export': '导出 .log',
+  'logs.exported': '已导出 {name}',
+  'logs.clear': '清空视图',
+  'logs.cleared': '日志视图已清空',
+  'logs.currentRunOnly': '仅当前运行',
+  'logs.allRuns': '全部运行',
+  'logs.meta': '元数据',
+  'logs.frames': '堆栈',
+  'logs.openSource': '跳到源码',
+  'logs.openFailed': '无法打开文件：{message}',
+  'logs.truncated': '只保留最近 {n} 条',
+  'logs.mark': '插入标记',
+  'logs.markPrompt': '标记文字',
+  'logs.marked': '已插入标记',
+  'logs.expandHint': '点击行可展开元数据与堆栈',
+  'logs.collapseHint': '点击收起',
+  'logs.allLevels': '全部级别',
+  'logs.allSources': '全部来源',
+  'logs.autoScroll': '自动滚动',
+  'logs.entries': '{n} 条',
+  'logs.totalBuffered': '缓冲 {n} 条',
+  'logs.filtersActive': '筛选生效中',
+  'logs.resetFilters': '清除筛选',
+  'logs.virtualized': '虚拟滚动（{n} 行）',
+
+  /* ---- network page (dev-ui-data) ------------------------------------ */
+  'net.title': '网络',
+  'net.subtitle': '来自 Dart VM Service 的 HTTP 请求记录',
+  'net.method': '方法',
+  'net.status': '状态',
+  'net.uri': 'URI',
+  'net.host': '主机',
+  'net.duration': '耗时',
+  'net.size': '大小',
+  'net.request': '请求',
+  'net.response': '响应',
+  'net.headers': 'Headers',
+  'net.body': 'Body',
+  'net.emptyTitle': '还没有网络请求',
+  'net.emptyBody': '启动应用并触发一次 HTTP 请求后，这里会显示记录。',
+  'net.errorsOnly': '只看失败',
+  'net.searchPlaceholder': '过滤 URI…',
+  'net.detailTitle': '请求详情',
+  'net.requestHeaders': '请求头',
+  'net.responseHeaders': '响应头',
+  'net.noBody': '没有 body',
+  'net.pending': '进行中',
+  'net.clear': '清空',
+  'net.copyUri': '复制 URI',
+  'net.allStatus': '全部状态',
+  'net.statusOk': '2xx 成功',
+  'net.statusError': '4xx / 5xx 失败',
+  'net.count': '{n} 个请求',
+  'net.truncated': '内容已截断',
+  'net.notConnected': 'VM Service 未连接，无法读取请求',
+  'net.filterHost': '主机',
+
+  /* ---- board (dev-ui-data) ------------------------------------------- */
+  'board.title': '看板',
+  'board.subtitle': '让 AI 执行的任务卡片',
+  'board.lane.backlog': '待办',
+  'board.lane.ready': '就绪',
+  'board.lane.running': '执行中',
+  'board.lane.review': '待验收',
+  'board.lane.verify': '验证中',
+  'board.lane.done': '完成',
+  'board.newTask': '新建卡片',
+  'board.editTask': '编辑卡片',
+  'board.deleteTask': '删除卡片',
+  'board.deleteConfirm': '删除「{title}」？此操作不可撤销。',
+  'board.archive': '归档已完成',
+  'board.archived': '已归档 {n} 张卡片',
+  'board.decompose': 'AI 拆解',
+  'board.decomposeHint': '描述一个需求，AI 会拆成带验收标准的卡片',
+  'board.decomposePrompt': '需求描述',
+  'board.decomposeEmpty': '请先写一段需求描述',
+  'board.decomposed': '已生成 {n} 张卡片',
+  'board.dispatch': '派发执行',
+  'board.dispatched': '已派发到会话 {id}',
+  'board.dispatchFailed': '派发失败：{message}',
+  'board.report': '回报结果',
+  'board.cancelAgent': '取消执行',
+  'board.syncAgent': '同步状态',
+  'board.fieldTitle': '标题',
+  'board.fieldDetail': '详情',
+  'board.fieldAcceptance': '验收标准（一行一条）',
+  'board.fieldVerify': '验证命令（一行一条）',
+  'board.fieldFiles': '涉及文件（一行一条）',
+  'board.fieldDeps': '依赖卡片（一行一条）',
+  'board.fieldPriority': '优先级',
+  'board.fieldTags': '标签（逗号分隔）',
+  'board.priority.low': '低',
+  'board.priority.normal': '普通',
+  'board.priority.high': '高',
+  'board.priority.urgent': '紧急',
+  'board.agent.idle': '空闲',
+  'board.agent.queued': '排队中',
+  'board.agent.working': '执行中',
+  'board.agent.blocked': '阻塞',
+  'board.agent.done': '已完成',
+  'board.agent.failed': '失败',
+  'board.blocked': '已阻塞',
+  'board.verdict.pass': '通过',
+  'board.verdict.fail': '未通过',
+  'board.result': '执行结果',
+  'board.history': '历史',
+  'board.emptyLane': '拖入卡片或点击 + 新建',
+  'board.emptyTitle': '看板是空的',
+  'board.emptyBody': '新建一张卡片，或让 AI 从一个想法开始拆解。',
+  'board.count': '{n} 张',
+  'board.noProject': '未绑定项目',
+  'board.moveTo': '移动到 {lane}',
+
+  /* ---- quality (dev-ui-data) ----------------------------------------- */
+  'quality.title': '质量',
+  'quality.subtitle': '分析、测试、异常、性能与截图',
+  'quality.tabAnalyze': '分析',
+  'quality.tabTest': '测试',
+  'quality.tabErrors': '异常',
+  'quality.tabPerf': '性能',
+  'quality.tabScreenshot': '截图',
+  'quality.analyze': '运行分析',
+  'quality.analyzing': '分析中…',
+  'quality.issues': '问题',
+  'quality.errors': '错误',
+  'quality.warnings': '警告',
+  'quality.infos': '提示',
+  'quality.noIssues': '没有发现问题',
+  'quality.runTests': '运行测试',
+  'quality.testing': '测试中…',
+  'quality.passed': '通过',
+  'quality.failed': '失败',
+  'quality.skipped': '跳过',
+  'quality.testDuration': '耗时',
+  'quality.noTests': '还没有测试结果',
+  'quality.errEmptyTitle': '没有异常',
+  'quality.errEmptyBody': '应用运行时的异常会按指纹去重后出现在这里。',
+  'quality.errCount': '出现 {n} 次',
+  'quality.errFrames': '堆栈帧',
+  'quality.errOpen': '跳到源码',
+  'quality.perfEmpty': '还没有帧统计',
+  'quality.jank': '掉帧',
+  'quality.frames': '帧数',
+  'quality.worstFrame': '最差帧',
+  'quality.buildTime': '构建',
+  'quality.rasterTime': '光栅化',
+  'quality.screenshot': '截屏',
+  'quality.capturing': '截图中…',
+  'quality.screenshotEmpty': '还没有截图',
+  'quality.screenshotSaved': '已保存到 {path}',
+  'quality.widgetTree': 'Widget 树',
+  'quality.dumpTree': '导出 Widget 树',
+  'quality.pubGet': 'pub get',
+  'quality.clean': 'clean',
+  'quality.build': '构建',
+  'quality.doctor': 'doctor',
+  'quality.format': 'format',
+  'quality.jobRunning': '任务执行中…',
+  'quality.jobDone': '任务完成',
+  'quality.jobFailed': '任务失败：{message}',
+  'quality.target': '构建目标',
+  'quality.openScreenshot': '打开截图',
+  'quality.noRun': '需要一次运行中的会话来收集数据',
+
+  /* ---- settings (dev-ui-data owns the page) -------------------------- */
+  'settings.title': '设置',
+  'settings.subtitle': '工作台与本机工具链配置',
+  'settings.save': '保存设置',
+  'settings.saved': '设置已保存',
+  'settings.saveFailed': '保存失败：{message}',
+  'settings.groupPaths': '路径',
+  'settings.groupWorkbench': '工作台',
+  'settings.groupAi': 'AI',
+  'settings.groupMcp': 'MCP',
+  'settings.flutterPath': 'Flutter SDK 路径',
+  'settings.dartPath': 'Dart SDK 路径',
+  'settings.logCapacity': '日志缓冲条数',
+  'settings.autoStart': '打开面板时自动启动上次运行',
+  'settings.dataDir': '数据目录',
+  'settings.editorCommand': '编辑器命令',
+  'settings.defaultProvider': '默认 AI provider',
+  'settings.defaultModel': '默认 AI model',
+  'settings.autoRefreshMs': '面板刷新间隔',
+  'settings.networkAutoRefreshMs': '网络日志刷新间隔',
+  'settings.maxTaskConcurrency': '看板并发任务数',
+  'settings.analysisEnabled': '自动分析错误',
+  'settings.mcpToken': 'MCP 访问令牌',
+  'settings.mcpEnabled': '启用 MCP',
+  'settings.mcpUrl': 'MCP 端点',
+  'settings.rotateToken': '重新生成',
+  'settings.tokenRotated': '令牌已更新',
+  'settings.resolvedPaths': '生效路径',
+  'settings.milliseconds': '毫秒',
+  'settings.descriptorOnly': '该项由宿主提供，暂不支持在此编辑',
+
+  /* ---- app state ------------------------------------------------------ */
   'state.offline': '无法连接工作台后端',
+  'state.connecting': '正在连接工作台…',
+  'state.connectionOk': '连接正常',
+  'state.lastOk': '最近成功 {time}',
+
+  /* ---- boot ---------------------------------------------------------- */
   'boot.placeholder': '工作台模块正在构建中',
+  'boot.disabled': '工作台未启用',
 }
+
 const EN = {
+  /* ---- common -------------------------------------------------------- */
+  'common.ok': 'OK',
+  'common.cancel': 'Cancel',
+  'common.close': 'Close',
+  'common.save': 'Save',
+  'common.saved': 'Saved',
+  'common.reset': 'Reset',
+  'common.delete': 'Delete',
+  'common.edit': 'Edit',
+  'common.copy': 'Copy',
+  'common.copied': 'Copied',
+  'common.copyFailed': 'Copy failed',
+  'common.refresh': 'Refresh',
+  'common.retry': 'Retry',
+  'common.loading': 'Loading…',
+  'common.empty': 'Nothing here yet',
+  'common.search': 'Search',
+  'common.all': 'All',
+  'common.none': 'None',
+  'common.yes': 'Yes',
+  'common.no': 'No',
+  'common.add': 'Add',
+  'common.remove': 'Remove',
+  'common.create': 'New',
+  'common.open': 'Open',
+  'common.export': 'Export',
+  'common.clear': 'Clear',
+  'common.apply': 'Apply',
+  'common.unknown': 'Unknown',
+  'common.details': 'Details',
+  'common.more': 'More',
+  'common.collapse': 'Collapse',
+  'common.expand': 'Expand',
+  'common.count': '{n} items',
+  'common.never': 'never',
+  'common.enabled': 'Enabled',
+  'common.disabled': 'Disabled',
+  'common.error': 'Something went wrong',
+  'common.actionFailed': 'Action failed: {message}',
+  'common.required': 'required',
+  'common.optional': 'optional',
+  'common.current': 'Current',
+  'common.total': 'Total',
+  'common.time': 'Time',
+  'common.status': 'Status',
+  'common.name': 'Name',
+  'common.path': 'Path',
+  'common.source': 'Source',
+  'common.level': 'Level',
+  'common.message': 'Message',
+  'common.run': 'Run',
+  'common.actions': 'Actions',
+  'common.filters': 'Filters',
+  'common.confirm': 'Confirm',
+  'common.select': 'Select',
+  'common.noneSelected': 'Nothing selected',
+  'common.start': 'Start',
+  'common.stop': 'Stop',
+  'common.duration': 'Duration',
+  'common.size': 'Size',
+  'common.type': 'Type',
+  'common.value': 'Value',
+  'common.key': 'Key',
+  'common.id': 'ID',
+  'common.download': 'Download',
+  'common.secondsAgo': '{n}s ago',
+  'common.minutesAgo': '{n}m ago',
+  'common.hoursAgo': '{n}h ago',
+  'common.justNow': 'just now',
+  'common.notAvailable': '—',
+
+  /* ---- nav ----------------------------------------------------------- */
   'nav.runtime': 'Runtime',
   'nav.logs': 'Logs',
   'nav.network': 'Network',
   'nav.board': 'Board',
   'nav.quality': 'Quality',
   'nav.settings': 'Settings',
-  'common.loading': 'Loading…',
-  'common.empty': 'Nothing here yet',
-  'common.refresh': 'Refresh',
-  'common.retry': 'Retry',
+  'nav.section': 'Workbench',
+
+  /* ---- shell --------------------------------------------------------- */
+  'shell.title': 'Flutter workbench',
+  'shell.subtitle': 'client development',
+  'shell.noProject': 'No project yet',
+  'shell.projectPlaceholder': 'Select a project…',
+  'shell.addProject': 'Add project',
+  'shell.addProjectTitle': 'Add a Flutter project',
+  'shell.addProjectHint': 'Absolute path of the project root (the folder with pubspec.yaml)',
+  'shell.addProjectPlaceholder': 'C:\\work\\my_app',
+  'shell.addProjectEmpty': 'Enter a project path',
+  'shell.removeProject': 'Remove from workbench',
+  'shell.removeProjectConfirm': 'Remove “{name}” from the workbench? Files on disk are untouched.',
+  'shell.projectAdded': 'Project added: {name}',
+  'shell.projectRemoved': 'Project removed',
+  'shell.connected': 'Connected',
+  'shell.disconnected': 'Disconnected',
+  'shell.offlineTitle': 'Cannot reach the workbench host',
+  'shell.offlineBody': 'Check that the plugin is enabled, then retry. {message}',
+  'shell.palette': 'Command palette',
+  'shell.palettePlaceholder': 'Search pages or commands…',
+  'shell.paletteEmpty': 'No matching command',
+  'shell.palettePages': 'Pages',
+  'shell.paletteActions': 'Commands',
+  'shell.paletteHint': '↑↓ select · Enter run · Esc close',
+  'shell.hintPalette': 'Ctrl/⌘ K palette',
+  'shell.hintRefreshLogs': 'R refresh logs',
+  'shell.hintEsc': 'Esc close',
+  'shell.logsCount': '{n} log lines',
+  'shell.errorsCount': '{n} exceptions',
+  'shell.runId': 'run {id}',
+  'shell.noRun': 'Nothing running',
+  'shell.devtools': 'DevTools',
+  'shell.vmUri': 'VM service',
+  'shell.copyVmUri': 'Copy VM URI',
+  'shell.vmUriMissing': 'No VM URI yet',
+  'shell.device': 'Device',
+  'shell.deviceMissing': 'No device detected',
+  'shell.pausePolling': 'Pause polling',
+  'shell.resumePolling': 'Resume polling',
+  'shell.paused': 'Polling paused',
+  'shell.locale': 'Language',
+  'shell.switchLocale': 'Switch to Chinese',
+  'shell.fallbackTitle': '{page} is not loaded',
+  'shell.fallbackBody': 'That page module is not in the client bundle yet — run node scripts/build-client.mjs.',
+  'shell.counters': 'Counters',
+  'shell.errorBoundary': 'Page render failed: {message}',
+
+  /* ---- phases -------------------------------------------------------- */
+  'phase.starting': 'Starting',
+  'phase.running': 'Running',
+  'phase.reloading': 'Reloading',
+  'phase.restarting': 'Restarting',
+  'phase.stopping': 'Stopping',
+  'phase.stopped': 'Stopped',
+  'phase.failed': 'Failed',
+  'phase.exited': 'Exited',
+  'phase.idle': 'Idle',
+
+  /* ---- devices ------------------------------------------------------- */
+  'device.device': 'Device',
+  'device.emulator': 'Emulator',
+  'device.none': 'No devices available',
+  'device.refresh': 'Refresh devices',
+  'device.select': 'Select device',
+  'device.platform': 'Platform',
+
+  /* ---- run ----------------------------------------------------------- */
+  'run.active': 'Current run',
+  'run.recent': 'Recent runs',
+  'run.empty': 'No runs yet',
+  'run.noActiveTitle': 'Nothing running yet',
+  'run.noActiveBody': 'Pick a run configuration and press Start.',
+  'run.id': 'Run ID',
+  'run.phase': 'Phase',
+  'run.exitCode': 'Exit code',
+  'run.pid': 'PID',
+  'run.startedAt': 'Started',
+  'run.finishedAt': 'Finished',
+  'run.duration': 'Uptime',
+  'run.hotReloads': 'Hot reloads',
+  'run.hotRestarts': 'Hot restarts',
+  'run.vmService': 'VM service',
+  'run.httpUri': 'HTTP URI',
+  'run.devtools': 'DevTools',
+  'run.appId': 'App id',
+  'run.device': 'Device',
+  'run.project': 'Project',
+  'run.program': 'Entry',
+  'run.error': 'Error',
+  'run.count': '{n}×',
+
+  /* ---- runtime page -------------------------------------------------- */
+  'runtime.title': 'Runtime',
+  'runtime.subtitle': 'Pick a project, configuration and device, then start, hot reload or hot restart.',
+  'runtime.controls': 'Run controls',
+  'runtime.project': 'Project',
+  'runtime.projectHint': 'Project roots come from the workbench project list',
+  'runtime.config': 'Run configuration',
+  'runtime.configEmpty': 'No run configuration found',
+  'runtime.configEmptyHint': 'Add a project, or check .vscode/launch.json and lib/main.dart.',
+  'runtime.configSourceLaunch': 'launch.json',
+  'runtime.configSourceEntry': 'entry point',
+  'runtime.configSourceManual': 'manual',
+  'runtime.configManual': 'Manual configuration',
+  'runtime.device': 'Device',
+  'runtime.deviceRefresh': 'Refresh devices',
+  'runtime.mode': 'Mode',
+  'runtime.flavor': 'Flavor',
+  'runtime.flavorHint': 'optional, e.g. dev / prod',
+  'runtime.dartDefines': 'Dart defines',
+  'runtime.dartDefinesEmpty': 'No defines yet',
+  'runtime.addDefine': 'Add define',
+  'runtime.defineKey': 'Key (e.g. API_URL)',
+  'runtime.defineValue': 'Value',
+  'runtime.args': 'Extra arguments',
+  'runtime.argsHint': 'space separated, e.g. --dart-define-from-file=env.json',
+  'runtime.program': 'Entry point',
+  'runtime.programHint': 'defaults to lib/main.dart',
+  'runtime.start': 'Start',
+  'runtime.stop': 'Stop',
+  'runtime.reload': 'Hot reload',
+  'runtime.restart': 'Hot restart',
+  'runtime.starting': 'Starting…',
+  'runtime.stopping': 'Stopping…',
+  'runtime.reloading': 'Reloading…',
+  'runtime.restarting': 'Restarting…',
+  'runtime.started': 'Run {id} started',
+  'runtime.stopped': 'Stopped {n} run(s)',
+  'runtime.reloaded': 'Hot reload done',
+  'runtime.restarted': 'Hot restart done',
+  'runtime.startFailed': 'Start failed: {message}',
+  'runtime.stopFailed': 'Stop failed: {message}',
+  'runtime.reloadFailed': 'Hot reload failed: {message}',
+  'runtime.restartFailed': 'Hot restart failed: {message}',
+  'runtime.noProject': 'Add and select a project first',
+  'runtime.noDevice': 'No device available — start an emulator or plug in a phone',
+  'runtime.launchFile': 'launch.json: {path}',
+  'runtime.launchFileNone': 'No launch.json — using entry-point configs',
+  'runtime.warnings': 'Configuration warnings',
+  'runtime.refreshConfigs': 'Rescan configs',
+  'runtime.configLoadFailed': 'Cannot read configs: {message}',
+  'runtime.pendingHint': '{phase}…',
+  'runtime.openDevtools': 'Open DevTools',
+  'runtime.copyUri': 'Copy URI',
+  'runtime.devtoolsNeedsRun': 'Start a run first so DevTools has a VM service URI.',
+  'runtime.recentEmpty': 'No runs yet — start one to see a summary here',
+  'runtime.definesCount': '{n} defines',
+  'runtime.deviceCount': '{n} devices',
+  'runtime.modeDebugHint': 'debug: assertions on, VM service available',
+  'runtime.modeProfileHint': 'profile: profiling, some debug features off',
+  'runtime.modeReleaseHint': 'release: production build, no hot reload',
+
+  /* ---- logs page ----------------------------------------------------- */
+  'logs.title': 'Logs',
+  'logs.follow': 'Follow',
+  'logs.followOn': 'Following',
+  'logs.followPaused': 'Paused',
+  'logs.searchPlaceholder': 'Search text or regex…',
+  'logs.regexInvalid': 'Invalid regex: {message}',
+  'logs.levels': 'Levels',
+  'logs.sources': 'Sources',
+  'logs.emptyTitle': 'No logs yet',
+  'logs.emptyBody': 'Start a run, or loosen the filters.',
+  'logs.noMatch': 'No log line matches the current filters',
+  'logs.showing': 'showing {shown} / {total}',
+  'logs.newLines': '{n} new log lines',
+  'logs.jumpToBottom': 'Jump to latest',
+  'logs.copyAll': 'Copy all',
+  'logs.copyAllDone': 'Copied {n} log lines',
+  'logs.export': 'Export .log',
+  'logs.exported': 'Exported {name}',
+  'logs.clear': 'Clear view',
+  'logs.cleared': 'Log view cleared',
+  'logs.currentRunOnly': 'Current run only',
+  'logs.allRuns': 'All runs',
+  'logs.meta': 'Metadata',
+  'logs.frames': 'Stack',
+  'logs.openSource': 'Jump to source',
+  'logs.openFailed': 'Cannot open file: {message}',
+  'logs.truncated': 'Keeping the newest {n} lines',
+  'logs.mark': 'Drop marker',
+  'logs.markPrompt': 'Marker text',
+  'logs.marked': 'Marker added',
+  'logs.expandHint': 'Click a row to expand metadata and stack frames',
+  'logs.collapseHint': 'Click to collapse',
+  'logs.allLevels': 'All levels',
+  'logs.allSources': 'All sources',
+  'logs.autoScroll': 'Auto scroll',
+  'logs.entries': '{n} lines',
+  'logs.totalBuffered': '{n} buffered',
+  'logs.filtersActive': 'Filters active',
+  'logs.resetFilters': 'Clear filters',
+  'logs.virtualized': 'Virtualized ({n} rows)',
+
+  /* ---- network page (dev-ui-data) ------------------------------------ */
+  'net.title': 'Network',
+  'net.subtitle': 'HTTP requests captured from the Dart VM service',
+  'net.method': 'Method',
+  'net.status': 'Status',
+  'net.uri': 'URI',
+  'net.host': 'Host',
+  'net.duration': 'Duration',
+  'net.size': 'Size',
+  'net.request': 'Request',
+  'net.response': 'Response',
+  'net.headers': 'Headers',
+  'net.body': 'Body',
+  'net.emptyTitle': 'No HTTP requests yet',
+  'net.emptyBody': 'Start the app and trigger a request; entries appear here.',
+  'net.errorsOnly': 'Failures only',
+  'net.searchPlaceholder': 'Filter by URI…',
+  'net.detailTitle': 'Request detail',
+  'net.requestHeaders': 'Request headers',
+  'net.responseHeaders': 'Response headers',
+  'net.noBody': 'No body',
+  'net.pending': 'Pending',
+  'net.clear': 'Clear',
+  'net.copyUri': 'Copy URI',
+  'net.allStatus': 'All statuses',
+  'net.statusOk': '2xx succeeded',
+  'net.statusError': '4xx / 5xx failed',
+  'net.count': '{n} requests',
+  'net.truncated': 'Content truncated',
+  'net.notConnected': 'VM service not connected — no requests to read',
+  'net.filterHost': 'Host',
+
+  /* ---- board (dev-ui-data) ------------------------------------------- */
+  'board.title': 'Board',
+  'board.subtitle': 'Task cards an agent can execute',
+  'board.lane.backlog': 'Backlog',
+  'board.lane.ready': 'Ready',
+  'board.lane.running': 'Running',
+  'board.lane.review': 'Review',
+  'board.lane.verify': 'Verify',
+  'board.lane.done': 'Done',
+  'board.newTask': 'New card',
+  'board.editTask': 'Edit card',
+  'board.deleteTask': 'Delete card',
+  'board.deleteConfirm': 'Delete “{title}”? This cannot be undone.',
+  'board.archive': 'Archive done',
+  'board.archived': 'Archived {n} cards',
+  'board.decompose': 'AI decompose',
+  'board.decomposeHint': 'Describe a requirement; the agent splits it into cards with acceptance criteria',
+  'board.decomposePrompt': 'Requirement',
+  'board.decomposeEmpty': 'Write a requirement first',
+  'board.decomposed': 'Created {n} cards',
+  'board.dispatch': 'Dispatch',
+  'board.dispatched': 'Dispatched to session {id}',
+  'board.dispatchFailed': 'Dispatch failed: {message}',
+  'board.report': 'Report result',
+  'board.cancelAgent': 'Cancel agent',
+  'board.syncAgent': 'Sync status',
+  'board.fieldTitle': 'Title',
+  'board.fieldDetail': 'Detail',
+  'board.fieldAcceptance': 'Acceptance criteria (one per line)',
+  'board.fieldVerify': 'Verify commands (one per line)',
+  'board.fieldFiles': 'Files (one per line)',
+  'board.fieldDeps': 'Dependencies (one per line)',
+  'board.fieldPriority': 'Priority',
+  'board.fieldTags': 'Tags (comma separated)',
+  'board.priority.low': 'Low',
+  'board.priority.normal': 'Normal',
+  'board.priority.high': 'High',
+  'board.priority.urgent': 'Urgent',
+  'board.agent.idle': 'Idle',
+  'board.agent.queued': 'Queued',
+  'board.agent.working': 'Working',
+  'board.agent.blocked': 'Blocked',
+  'board.agent.done': 'Done',
+  'board.agent.failed': 'Failed',
+  'board.blocked': 'Blocked',
+  'board.verdict.pass': 'Pass',
+  'board.verdict.fail': 'Fail',
+  'board.result': 'Result',
+  'board.history': 'History',
+  'board.emptyLane': 'Drop a card here or press +',
+  'board.emptyTitle': 'The board is empty',
+  'board.emptyBody': 'Create a card, or let the agent decompose an idea.',
+  'board.count': '{n} cards',
+  'board.noProject': 'No project bound',
+  'board.moveTo': 'Move to {lane}',
+
+  /* ---- quality (dev-ui-data) ----------------------------------------- */
+  'quality.title': 'Quality',
+  'quality.subtitle': 'Analyzer, tests, exceptions, performance and screenshots',
+  'quality.tabAnalyze': 'Analyze',
+  'quality.tabTest': 'Tests',
+  'quality.tabErrors': 'Exceptions',
+  'quality.tabPerf': 'Performance',
+  'quality.tabScreenshot': 'Screenshot',
+  'quality.analyze': 'Run analyze',
+  'quality.analyzing': 'Analyzing…',
+  'quality.issues': 'Issues',
+  'quality.errors': 'Errors',
+  'quality.warnings': 'Warnings',
+  'quality.infos': 'Info',
+  'quality.noIssues': 'No issues found',
+  'quality.runTests': 'Run tests',
+  'quality.testing': 'Testing…',
+  'quality.passed': 'Passed',
+  'quality.failed': 'Failed',
+  'quality.skipped': 'Skipped',
+  'quality.testDuration': 'Duration',
+  'quality.noTests': 'No test results yet',
+  'quality.errEmptyTitle': 'No exceptions',
+  'quality.errEmptyBody': 'Runtime exceptions are deduplicated by fingerprint and listed here.',
+  'quality.errCount': 'seen {n}×',
+  'quality.errFrames': 'Stack frames',
+  'quality.errOpen': 'Jump to source',
+  'quality.perfEmpty': 'No frame statistics yet',
+  'quality.jank': 'Jank',
+  'quality.frames': 'Frames',
+  'quality.worstFrame': 'Worst frame',
+  'quality.buildTime': 'Build',
+  'quality.rasterTime': 'Raster',
+  'quality.screenshot': 'Screenshot',
+  'quality.capturing': 'Capturing…',
+  'quality.screenshotEmpty': 'No screenshot yet',
+  'quality.screenshotSaved': 'Saved to {path}',
+  'quality.widgetTree': 'Widget tree',
+  'quality.dumpTree': 'Dump widget tree',
+  'quality.pubGet': 'pub get',
+  'quality.clean': 'clean',
+  'quality.build': 'build',
+  'quality.doctor': 'doctor',
+  'quality.format': 'format',
+  'quality.jobRunning': 'Job running…',
+  'quality.jobDone': 'Job finished',
+  'quality.jobFailed': 'Job failed: {message}',
+  'quality.target': 'Build target',
+  'quality.openScreenshot': 'Open screenshot',
+  'quality.noRun': 'A live run is needed to collect data',
+
+  /* ---- settings (dev-ui-data owns the page) -------------------------- */
+  'settings.title': 'Settings',
+  'settings.subtitle': 'Workbench and local toolchain configuration',
+  'settings.save': 'Save settings',
+  'settings.saved': 'Settings saved',
+  'settings.saveFailed': 'Save failed: {message}',
+  'settings.groupPaths': 'Paths',
+  'settings.groupWorkbench': 'Workbench',
+  'settings.groupAi': 'AI',
+  'settings.groupMcp': 'MCP',
+  'settings.flutterPath': 'Flutter SDK path',
+  'settings.dartPath': 'Dart SDK path',
+  'settings.logCapacity': 'Log buffer size',
+  'settings.autoStart': 'Auto-start the last run when the panel opens',
+  'settings.dataDir': 'Data directory',
+  'settings.editorCommand': 'Editor command',
+  'settings.defaultProvider': 'Default AI provider',
+  'settings.defaultModel': 'Default AI model',
+  'settings.autoRefreshMs': 'Panel refresh interval',
+  'settings.networkAutoRefreshMs': 'Network refresh interval',
+  'settings.maxTaskConcurrency': 'Board concurrency',
+  'settings.analysisEnabled': 'Analyze errors automatically',
+  'settings.mcpToken': 'MCP token',
+  'settings.mcpEnabled': 'Enable MCP',
+  'settings.mcpUrl': 'MCP endpoint',
+  'settings.rotateToken': 'Rotate',
+  'settings.tokenRotated': 'Token rotated',
+  'settings.resolvedPaths': 'Resolved paths',
+  'settings.milliseconds': 'ms',
+  'settings.descriptorOnly': 'Provided by the host; not editable here',
+
+  /* ---- app state ------------------------------------------------------ */
   'state.offline': 'Cannot reach the workbench host',
+  'state.connecting': 'Connecting to the workbench…',
+  'state.connectionOk': 'Connected',
+  'state.lastOk': 'last success {time}',
+
+  /* ---- boot ---------------------------------------------------------- */
   'boot.placeholder': 'Workbench modules are being built',
+  'boot.disabled': 'Workbench is disabled',
 }
 
 /** Active UI language; `90-apply.js` syncs it with the host locale service. */
@@ -83,40 +1047,297 @@ function setActiveLocale(next) {
   if (next === 'en' || next === 'zh') currentLocale = next
 }
 
+/**
+ * Translate a key. `{name}` placeholders are replaced from `vars`.
+ * Unknown keys degrade to the key itself so a missing string is obvious but
+ * never throws.
+ * @param {string} key dictionary key.
+ * @param {Record<string, any>} [vars] placeholder values.
+ * @returns {string} localized text.
+ */
 function t(key, vars) {
+  if (key === undefined || key === null) return ''
   const dict = LANG() === 'en' ? EN : ZH
-  let text = dict[key] ?? key
-  if (vars !== undefined) {
-    for (const [name, value] of Object.entries(vars)) text = text.replaceAll(`{${name}}`, String(value))
+  let text = dict[key]
+  if (text === undefined) {
+    const other = LANG() === 'en' ? ZH : EN
+    text = other[key] ?? key
+  }
+  if (vars !== undefined && vars !== null) {
+    for (const name of Object.keys(vars)) text = text.replaceAll(`{${name}}`, String(vars[name]))
   }
   return text
 }
 
+/* ====================================================================== *
+ * Formatting helpers
+ * ====================================================================== */
+
+function padNumber(value, width = 2) {
+  return String(value).padStart(width, '0')
+}
+
+/**
+ * Wall-clock format for log rows, run tables and tooltips.
+ * @param {number|null|undefined} at epoch milliseconds.
+ * @param {{ms?: boolean, date?: boolean, clock?: boolean}} [options] detail level.
+ * @returns {string} formatted time, or an em dash when unknown.
+ */
+function formatTime(at, options = {}) {
+  if (at === null || at === undefined) return t('common.notAvailable')
+  const value = Number(at)
+  if (!Number.isFinite(value) || value <= 0) return t('common.notAvailable')
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return t('common.notAvailable')
+  const stamp = `${padNumber(date.getHours())}:${padNumber(date.getMinutes())}:${padNumber(date.getSeconds())}`
+  if (options.ms === true) return `${stamp}.${padNumber(date.getMilliseconds(), 3)}`
+  if (options.date === true) return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())} ${stamp}`
+  if (options.clock === true) return `${padNumber(date.getHours())}:${padNumber(date.getMinutes())}`
+  return stamp
+}
+
+/**
+ * Compact duration: `820ms`, `1.4s`, `2m 03s`, `1h 04m`.
+ * @param {number|null|undefined} value milliseconds.
+ * @returns {string} human duration.
+ */
+function formatDuration(value) {
+  const ms = Number(value)
+  if (!Number.isFinite(ms) || ms < 0) return t('common.notAvailable')
+  if (ms === 0) return '0ms'
+  if (ms < 1) return '<1ms'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes < 60) return `${minutes}m ${padNumber(seconds)}s`
+  return `${Math.floor(minutes / 60)}h ${padNumber(minutes % 60)}m`
+}
+
+/**
+ * Relative time for tables and log metadata.
+ * @param {number|null|undefined} at epoch milliseconds.
+ * @param {number} [now] reference instant (defaults to Date.now()).
+ * @returns {string} relative label.
+ */
+function formatRelative(at, now = Date.now()) {
+  const value = Number(at)
+  if (!Number.isFinite(value) || value <= 0) return t('common.never')
+  const delta = Math.max(0, Number(now) - value)
+  if (delta < 5000) return t('common.justNow')
+  if (delta < 60000) return t('common.secondsAgo', { n: Math.round(delta / 1000) })
+  if (delta < 3600000) return t('common.minutesAgo', { n: Math.round(delta / 60000) })
+  if (delta < 86400000) return t('common.hoursAgo', { n: Math.round(delta / 3600000) })
+  return formatTime(value, { date: true })
+}
+
+/** Byte size with one unit step. */
+function formatBytes(bytes) {
+  const value = Number(bytes)
+  if (!Number.isFinite(value) || value < 0) return t('common.notAvailable')
+  if (value < 1024) return `${Math.round(value)}B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)}MB`
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)}GB`
+}
+
+/**
+ * Truncate to `max` characters with a single ellipsis.
+ * @param {any} text value to shorten.
+ * @param {number} [max] maximum length, default 80.
+ * @returns {string} shortened text.
+ */
+function truncate(text, max = 80) {
+  const value = String(text ?? '')
+  const limit = Math.max(1, Number(max) || 80)
+  if (value.length <= limit) return value
+  return `${value.slice(0, limit - 1)}…`
+}
+
+/** Remove ANSI escape sequences (colour codes, cursors) from terminal text. */
+function stripAnsi(text) {
+  return String(text ?? '')
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007]*\u0007/g, '')
+    .replace(/\u001b[@-_]/g, '')
+}
+
+/**
+ * Semantic tone for a run phase or a status-ish string.
+ * @param {string|null|undefined} value status token.
+ * @returns {'ok'|'warn'|'error'|'info'|'neutral'} tone name.
+ */
+function statusTone(value) {
+  switch (String(value ?? '')) {
+    case 'running':
+    case 'ok':
+    case 'connected':
+    case 'passed':
+    case 'pass':
+    case 'done':
+    case 'success':
+      return 'ok'
+    case 'starting':
+    case 'reloading':
+    case 'restarting':
+    case 'stopping':
+    case 'queued':
+    case 'pending':
+    case 'working':
+    case 'warn':
+    case 'warning':
+      return 'warn'
+    case 'failed':
+    case 'error':
+    case 'fatal':
+    case 'blocked':
+      return 'error'
+    case 'info':
+    case 'debug':
+    case 'trace':
+      return 'info'
+    default:
+      return 'neutral'
+  }
+}
+
+/** Tone for a log level. */
+function levelTone(level) {
+  switch (String(level ?? '')) {
+    case 'error':
+    case 'fatal':
+      return 'error'
+    case 'warn':
+      return 'warn'
+    case 'info':
+      return 'info'
+    default:
+      return 'neutral'
+  }
+}
+
+/** Tone for an analyzer severity. */
+function severityTone(severity) {
+  switch (String(severity ?? '')) {
+    case 'error':
+      return 'error'
+    case 'warning':
+      return 'warn'
+    case 'info':
+      return 'info'
+    default:
+      return 'neutral'
+  }
+}
+
+/** Resolve a tone name into foreground/background/border token mix. */
+function toneColors(tone) {
+  switch (tone) {
+    case 'ok':
+      return { fg: T.ok, bg: `color-mix(in srgb, ${T.ok} 16%, transparent)`, border: `color-mix(in srgb, ${T.ok} 42%, transparent)` }
+    case 'warn':
+      return { fg: T.warnLabel, bg: `color-mix(in srgb, ${T.warn} 18%, transparent)`, border: `color-mix(in srgb, ${T.warn} 42%, transparent)` }
+    case 'error':
+      return { fg: T.error, bg: `color-mix(in srgb, ${T.error} 16%, transparent)`, border: `color-mix(in srgb, ${T.error} 42%, transparent)` }
+    case 'brand':
+    case 'info':
+      return { fg: T.brand, bg: `color-mix(in srgb, ${T.brand} 16%, transparent)`, border: `color-mix(in srgb, ${T.brand} 40%, transparent)` }
+    case 'done':
+      return { fg: T.done, bg: `color-mix(in srgb, ${T.done} 16%, transparent)`, border: `color-mix(in srgb, ${T.done} 40%, transparent)` }
+    default:
+      return { fg: T.textDim, bg: T.tag, border: T.border }
+  }
+}
+
+/* ====================================================================== *
+ * HTTP transport
+ * ====================================================================== */
+
 function buildQuery(query) {
   if (query === undefined || query === null) return ''
+  if (typeof query === 'string') return query === '' ? '' : `?${query.replace(/^\?/, '')}`
   const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
+  for (const key of Object.keys(query)) {
+    const value = query[key]
     if (value === undefined || value === null || value === '') continue
+    if (Array.isArray(value)) {
+      const list = value.filter((item) => item !== undefined && item !== null && item !== '')
+      if (list.length > 0) params.set(key, list.join(','))
+      continue
+    }
     params.set(key, String(value))
   }
   const search = params.toString()
   return search === '' ? '' : `?${search}`
 }
 
-async function api(path, options = {}) {
-  const { method = 'GET', body, query, signal } = options
-  const init = { method, cache: 'no-store', credentials: 'same-origin', signal }
-  if (body !== undefined) {
-    init.headers = { 'content-type': 'application/json' }
-    init.body = JSON.stringify(body)
-  }
-  let response
+/**
+ * Resolve a plugin route against the page the UI is served from so a
+ * reverse-proxy mount prefix keeps working.
+ * @param {string} path route relative to `API`.
+ * @param {object} [query] query values (arrays are comma joined).
+ * @returns {string} pathname + query usable by `fetch`.
+ */
+function apiUrl(path, query) {
+  const route = String(path ?? '')
+  const suffix = route.startsWith('/') ? route : `/${route}`
+  let pathname = `${API}${suffix}`
   try {
-    response = await fetch(`${API}${path}${buildQuery(query)}`, init)
-  } catch (error) {
-    throw Object.assign(new Error(`${t('state.offline')} (${String(error?.message ?? error)})`), { status: 0, code: 'network' })
+    if (typeof document !== 'undefined' && document.baseURI) {
+      pathname = new URL(`${API.replace(/^\//, '')}${suffix}`, document.baseURI).pathname
+    }
+  } catch {
+    /* keep the root-absolute fallback */
   }
-  const text = await response.text()
+  const search = buildQuery(query)
+  return search === '' ? pathname : `${pathname}${search}`
+}
+
+/** Build the error shape callers branch on: `{ status, code, message, body }`. */
+function apiError(status, code, message, body, cause) {
+  const error = new Error(String(message ?? t('common.error')))
+  error.status = Number(status) || 0
+  error.code = code === undefined || code === null ? 'http' : String(code)
+  error.body = body === undefined ? null : body
+  if (cause !== undefined && cause !== null) error.cause = cause
+  return error
+}
+
+/**
+ * One JSON request against the workbench host.
+ *
+ * Resolves with the parsed body only when the response is ok **and** the body
+ * is not `{ ok: false }`; every other outcome throws the `apiError` shape.
+ * @param {string} path route relative to `API` (e.g. `/state`).
+ * @param {{method?: string, body?: any, query?: object, signal?: AbortSignal,
+ *   headers?: object}} [options] request options.
+ * @returns {Promise<any>} parsed JSON body.
+ */
+async function api(path, options = {}) {
+  const method = String(options.method ?? 'GET').toUpperCase()
+  const init = { method, cache: 'no-store', credentials: 'same-origin' }
+  if (options.signal !== undefined) init.signal = options.signal
+  const headers = {}
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (options.headers !== undefined && options.headers !== null) Object.assign(headers, options.headers)
+  if (Object.keys(headers).length > 0) init.headers = headers
+  if (options.body !== undefined) init.body = JSON.stringify(options.body)
+
+  let response = null
+  try {
+    response = await fetch(apiUrl(path, options.query), init)
+  } catch (cause) {
+    if (cause !== null && cause !== undefined && cause.name === 'AbortError') throw cause
+    throw apiError(0, 'network', `${t('state.offline')} (${String(cause?.message ?? cause)})`, null, cause)
+  }
+
+  let text = ''
+  try {
+    text = await response.text()
+  } catch {
+    text = ''
+  }
   let data = null
   if (text !== '') {
     try {
@@ -125,197 +1346,1796 @@ async function api(path, options = {}) {
       data = null
     }
   }
-  if (response.ok === false || (data !== null && data.ok === false)) {
-    throw Object.assign(new Error(data?.message ?? `HTTP ${response.status}`), {
-      status: response.status,
-      code: data?.code ?? 'http',
-      body: data,
-    })
+
+  if (response.ok !== true) {
+    const message = data !== null && data !== undefined && data.message !== undefined
+      ? data.message
+      : `HTTP ${response.status}${path ? ` · ${path}` : ''}`
+    throw apiError(response.status, data?.code ?? `http-${response.status}`, message, data, null)
   }
-  return data ?? {}
+  if (data !== null && data !== undefined && data.ok === false) {
+    throw apiError(response.status, data.code ?? 'not-ok', data.message ?? t('common.error'), data, null)
+  }
+  if (data === null || data === undefined) return {}
+  return data
 }
 
-function usePoll(load, intervalMs, deps = []) {
-  const [data, setData] = React.useState(null)
+/** Fire-and-forget POST helper; still returns the parsed body. */
+function postJson(path, body, options = {}) {
+  return api(path, { ...options, method: 'POST', body: body ?? {} })
+}
+
+/* ====================================================================== *
+ * Hooks
+ * ====================================================================== */
+
+/**
+ * Poll a loader on an interval.
+ *
+ * - runs the loader once immediately, then every `intervalMs` (0 = once);
+ * - keeps the previous `data` when a poll fails and records `error`;
+ * - `refresh()` always re-runs the loader and resolves with its value;
+ * - the interval never overlaps a running load, is skipped while the document
+ *   is hidden, refreshes on visibility change, and is cleared on unmount.
+ * @param {() => any} load loader; may return a promise.
+ * @param {number} intervalMs poll cadence; 0 disables polling.
+ * @param {any[]} [deps] extra dependencies that recreate the timer.
+ * @param {{enabled?: boolean, initial?: any}} [options] switches.
+ * @returns {{data: any, error: Error|null, loading: boolean,
+ *   lastOkAt: number|null, refresh: () => Promise<any>}}
+ */
+function usePoll(load, intervalMs, deps = [], options = {}) {
+  const enabled = options.enabled !== false
+  const [data, setData] = React.useState(options.initial === undefined ? null : options.initial)
   const [error, setError] = React.useState(null)
-  const [loading, setLoading] = React.useState(true)
+  const [loading, setLoading] = React.useState(enabled)
+  const [lastOkAt, setLastOkAt] = React.useState(null)
   const loadRef = React.useRef(load)
   loadRef.current = load
+  const aliveRef = React.useRef(true)
+  const busyRef = React.useRef(false)
+
+  React.useEffect(() => () => { aliveRef.current = false }, [])
 
   const refresh = React.useCallback(async () => {
+    if (busyRef.current === true) return null
+    busyRef.current = true
     try {
       const value = await loadRef.current()
-      setData(value)
-      setError(null)
+      if (aliveRef.current === true) {
+        setData(value)
+        setError(null)
+        setLastOkAt(Date.now())
+      }
       return value
     } catch (issue) {
-      setError(issue)
+      if (aliveRef.current === true && issue?.name !== 'AbortError') setError(issue ?? new Error('request failed'))
       return null
     } finally {
-      setLoading(false)
+      busyRef.current = false
+      if (aliveRef.current === true) setLoading(false)
     }
   }, [])
 
   React.useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    refresh()
-    if (intervalMs > 0) {
-      const timer = setInterval(() => {
-        if (cancelled === false) refresh()
-      }, intervalMs)
-      return () => {
-        cancelled = true
-        clearInterval(timer)
-      }
+    if (enabled !== true) {
+      setLoading(false)
+      return undefined
     }
+    aliveRef.current = true
+    setLoading(true)
+    void refresh()
+    if (!(Number(intervalMs) > 0)) return undefined
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      void refresh()
+    }, Number(intervalMs))
+    const onVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') void refresh()
+    }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
     return () => {
-      cancelled = true
+      window.clearInterval(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intervalMs, ...deps])
+  }, [enabled, Number(intervalMs) || 0, refresh, ...deps])
 
-  return { data, error, loading, refresh, setData, setError }
+  return { data, error, loading, lastOkAt, refresh, setData, setError }
 }
 
-/* ---- minimal UI kit (dev-ui-core replaces with the full one) ---------- */
+/**
+ * A `useState` whose value survives a page switch through sessionStorage.
+ * JSON encoded, so primitives and plain objects both work.
+ * @param {string} key storage key.
+ * @param {any} initial fallback when nothing usable is stored.
+ * @returns {[any, (next: any) => void]} state pair.
+ */
+function useSessionState(key, initial) {
+  const [value, setValue] = React.useState(() => {
+    try {
+      const raw = window.sessionStorage.getItem(key)
+      if (raw === null) return initial
+      const parsed = JSON.parse(raw)
+      return parsed === null || parsed === undefined ? initial : parsed
+    } catch {
+      return initial
+    }
+  })
+  const update = React.useCallback((next) => {
+    setValue((previous) => {
+      const resolved = typeof next === 'function' ? next(previous) : next
+      try {
+        window.sessionStorage.setItem(key, JSON.stringify(resolved))
+      } catch {
+        /* private mode: keep the value for this session only */
+      }
+      return resolved
+    })
+  }, [key])
+  return [value, update]
+}
 
-function Spinner({ size = 14 }) {
-  return h('span', {
+/** Hover state + handlers for inline-styled hovers. */
+function useHover() {
+  const [hover, setHover] = React.useState(false)
+  const handlers = React.useMemo(() => ({
+    onMouseEnter: () => setHover(true),
+    onMouseLeave: () => setHover(false),
+  }), [])
+  return [hover, handlers]
+}
+
+/** True when a keyboard event came from a typing surface. */
+function isTypingTarget(target) {
+  if (target === null || target === undefined || typeof target.tagName !== 'string') return false
+  const tag = target.tagName.toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true
+  return target.isContentEditable === true
+}
+
+/**
+ * Toast queue: up to `max` visible entries, auto-dismissing after a tone based
+ * TTL. `show()` is safe to call from actions (it never throws).
+ * @param {number} [max] queue length, default 4.
+ * @returns {{toasts: object[], show: Function, dismiss: Function, clear: Function,
+ *   toast: object|null}} queue plus helpers.
+ */
+function useToast(max = 4) {
+  const [toasts, setToasts] = React.useState([])
+  const seqRef = React.useRef(0)
+  const timersRef = React.useRef(new Set())
+
+  const dismiss = React.useCallback((id) => {
+    setToasts((previous) => previous.filter((item) => item.id !== id))
+  }, [])
+
+  const show = React.useCallback((message, tone = 'info', opts = {}) => {
+    const text = String(message ?? '')
+    if (text === '') return 0
+    const id = seqRef.current + 1
+    seqRef.current = id
+    const entry = { id, message: text, tone: tone === undefined || tone === null ? 'info' : String(tone) }
+    setToasts((previous) => {
+      const kept = previous.length >= max ? previous.slice(previous.length - max + 1) : previous
+      return [...kept, entry]
+    })
+    const ttl = Number(opts.ttl ?? (entry.tone === 'error' ? 8000 : 4500))
+    if (ttl > 0 && typeof window !== 'undefined') {
+      const timer = window.setTimeout(() => {
+        timersRef.current.delete(timer)
+        dismiss(id)
+      }, ttl)
+      timersRef.current.add(timer)
+    }
+    return id
+  }, [dismiss, max])
+
+  const clear = React.useCallback(() => setToasts([]), [])
+
+  React.useEffect(() => () => {
+    for (const timer of timersRef.current) window.clearTimeout(timer)
+    timersRef.current.clear()
+  }, [])
+
+  return { toasts, show, dismiss, clear, toast: toasts.length === 0 ? null : toasts[toasts.length - 1] }
+}
+
+/* ====================================================================== *
+ * Clipboard / download helpers
+ * ====================================================================== */
+
+/** Copy text, preferring the async clipboard API. Never throws. */
+async function copyText(text) {
+  const value = String(text ?? '')
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard !== undefined && typeof navigator.clipboard.writeText === 'function') {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch {
+    /* fall through to execCommand */
+  }
+  try {
+    if (typeof document === 'undefined') return false
+    const area = document.createElement('textarea')
+    area.value = value
+    area.setAttribute('readonly', 'readonly')
+    area.style.position = 'fixed'
+    area.style.top = '-1000px'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(area)
+    return ok === true
+  } catch {
+    return false
+  }
+}
+
+/** Trigger a browser download for text content. Returns the file name used. */
+function downloadText(filename, text, mime = 'text/plain;charset=utf-8') {
+  const name = String(filename ?? 'export.txt')
+  try {
+    if (typeof document === 'undefined' || typeof URL === 'undefined' || typeof Blob === 'undefined') return name
+    const blob = new Blob([String(text ?? '')], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = name
+    anchor.rel = 'noopener'
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    window.setTimeout(() => URL.revokeObjectURL(url), 2000)
+  } catch {
+    /* download blocked: the caller reports it */
+  }
+  return name
+}
+
+/* ====================================================================== *
+ * One injected stylesheet (things inline styles cannot express)
+ * ====================================================================== */
+
+const BASE_CSS = [
+  '.fwb-root,.fwb-root *{box-sizing:border-box}',
+  '.fwb-root{height:100%;min-height:0;font-family:var(--dsw-font-family,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif);',
+  'font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}',
+  '.fwb-root button{font:inherit;color:inherit}',
+  '.fwb-root input,.fwb-root textarea,.fwb-root select{font:inherit;color:inherit}',
+  '.fwb-root :focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}',
+  '.fwb-scroll{scrollbar-width:thin;scrollbar-color:var(--dsw-alias-scrollbar-bg-l2) transparent}',
+  '.fwb-scroll::-webkit-scrollbar{width:8px;height:8px}',
+  '.fwb-scroll::-webkit-scrollbar-thumb{background:var(--dsw-alias-scrollbar-bg-l2);border-radius:4px}',
+  '.fwb-scroll::-webkit-scrollbar-track{background:transparent}',
+  '.fwb-row{transition:background 80ms linear}',
+  '.fwb-row:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+  '.fwb-none{display:none}',
+  '@keyframes fwb-spin{to{transform:rotate(360deg)}}',
+  '@keyframes fwb-pulse{0%,100%{opacity:.45}50%{opacity:.95}}',
+].join('')
+
+/** Inject BASE_CSS exactly once. Cosmetic failure must never break the panel. */
+function ensureStyles() {
+  try {
+    if (typeof document === 'undefined') return
+    if (document.getElementById('flutter-workbench-styles') !== null) return
+    const holder = document.createElement('div')
+    holder.id = 'flutter-workbench-styles'
+    holder.style.display = 'none'
+    holder.textContent = `<style>${BASE_CSS}</style>`
+    document.head.appendChild(holder)
+  } catch {
+    /* styles are cosmetic */
+  }
+}
+
+/* ====================================================================== *
+ * Icons (16×16, stroke only, currentColor)
+ * ====================================================================== */
+
+const ICONS = {
+  runtime: ['M5.5 3.6l6 4.4-6 4.4z'],
+  play: ['M5.5 3.6l6 4.4-6 4.4z'],
+  stop: ['M4.5 4.5h7v7h-7z'],
+  reload: ['M13 8a5 5 0 01-8.6 3.4M3 8a5 5 0 018.6-3.4', 'M11.6 2.2v3h-3M4.4 13.8v-3h3'],
+  restart: ['M13 8a5 5 0 11-1.9-3.9', 'M13 2.4v3.1h-3.1'],
+  logs: ['M3 4h10M3 7h8M3 10h10M3 13h6'],
+  network: ['M8 2.6a2 2 0 100 4 2 2 0 000-4z', 'M3 13.4a2 2 0 100-4 2 2 0 000 4z', 'M13 13.4a2 2 0 100-4 2 2 0 000 4z', 'M8 6.6v3.2M8 9.8l-4 1.6M8 9.8l4 1.6'],
+  board: ['M3 3.5h3.2v9H3z', 'M7.4 3.5h3.2v5.6H7.4z', 'M11.8 3.5H15v7.4h-3.2z'],
+  quality: ['M8 2.6l5 2v4.2c0 2.4-2 4.2-5 4.6-3-.4-5-2.2-5-4.6V4.6z', 'M6 8l1.5 1.5L10.5 6.4'],
+  gear: ['M8 5.9a2.1 2.1 0 100 4.2 2.1 2.1 0 000-4.2z', 'M8 2.2v1.6M8 12.2v1.6M2.2 8h1.6M12.2 8h1.6M3.9 3.9l1.1 1.1M11 11l1.1 1.1M12.1 3.9L11 5M5 11l-1.1 1.1'],
+  search: ['M7 3a4 4 0 100 8 4 4 0 000-8z', 'M10 10l3.6 3.6'],
+  plus: ['M8 3.5v9M3.5 8h9'],
+  minus: ['M3.5 8h9'],
+  x: ['M4 4l8 8M12 4l-8 8'],
+  copy: ['M5.5 5.5h7v7h-7z', 'M10.5 5.5v-2h-7v7h2'],
+  external: ['M6.5 3H13v6.5M13 3L7 9M3.5 6v6.5H10'],
+  refresh: ['M13 8a5 5 0 01-8.5 3.5M3 8a5 5 0 018.5-3.5M11.5 2v3h-3M4.5 14v-3h3'],
+  chevronDown: ['M4 6l4 4 4-4'],
+  chevronRight: ['M6 4l4 4-4 4'],
+  arrowDown: ['M8 3v9M4.5 8.5L8 12l3.5-3.5'],
+  warn: ['M8 2.8l5.2 10.4H2.8z', 'M8 6.4v3.1', 'M8 11.2v.9'],
+  clock: ['M8 2.8a5.2 5.2 0 100 10.4A5.2 5.2 0 008 2.8z', 'M8 5v3.2l2 1.3'],
+  folder: ['M2.5 4h4l1 1.5h6V13h-11z'],
+  filter: ['M3 4h10M5.5 8h5M7.5 12h1'],
+  trash: ['M3 4.5h10M6 4.5V3h4v1.5M5 4.5l.6 8.5h4.8l.6-8.5'],
+  check: ['M3.5 8.5l3 3 6-6.5'],
+  dot: ['M8 6.2a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6z'],
+  terminal: ['M4 4.5l3.5 3.5L4 11.5', 'M9 11.5h3.5'],
+  device: ['M5 2.5h6v11H5z', 'M7 11.5h2'],
+  spark: ['M8 2l1.5 4L14 7.5 9.5 9 8 13 6.5 9 2 7.5 6.5 6z'],
+  pause: ['M6 4v8M10 4v8'],
+  camera: ['M3 5.5h2.2L6.5 4h3L10.8 5.5H13V13H3z', 'M8 7.4a2.2 2.2 0 100 4.4 2.2 2.2 0 000-4.4z'],
+  code: ['M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4'],
+  file: ['M4 2.5h5l3 3v8H4z', 'M9 2.5v3h3'],
+}
+
+/**
+ * Inline icon.
+ * @param {{name?: string, size?: number, color?: string, style?: object}} props icon props.
+ * @returns {any} svg element.
+ */
+function Icon({ name, size = 14, color, style }) {
+  const paths = ICONS[name] ?? ICONS.dot
+  return h('svg', {
+    width: size,
+    height: size,
+    viewBox: '0 0 16 16',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.4,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+    focusable: 'false',
+    style: { flex: 'none', color: color ?? 'currentColor', ...(style ?? {}) },
+  }, paths.map((d, index) => h('path', { key: index, d })))
+}
+
+/* ====================================================================== *
+ * UI kit
+ * ====================================================================== */
+
+/**
+ * Button.
+ * @param {{children?: any, onClick?: Function, kind?: string, variant?: string,
+ *   size?: 'sm'|'md', icon?: string, disabled?: boolean, title?: string,
+ *   style?: object, block?: boolean, type?: string}} props button props.
+ * @returns {any} button element.
+ */
+function Btn(props) {
+  const [hover, bind] = useHover()
+  const kind = props.variant ?? props.kind ?? 'ghost'
+  const small = props.size === 'sm'
+  const disabled = props.disabled === true
+  const base = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: small ? 24 : 28,
+    padding: small ? '0 8px' : '0 11px',
+    borderRadius: T.radiusSm,
+    border: `1px solid ${T.borderStrong}`,
+    background: 'transparent',
+    color: T.text,
+    fontWeight: 500,
+    fontSize: small ? T.fsXs : T.fsSm,
+    whiteSpace: 'nowrap',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.5 : 1,
+    ...(props.block === true ? { width: '100%' } : {}),
+    ...(props.style ?? {}),
+  }
+  if (kind === 'primary') {
+    Object.assign(base, { background: T.btn, borderColor: T.btn, color: T.btnFg, fontWeight: 600 })
+    if (hover && !disabled) base.filter = 'brightness(1.08)'
+  } else if (kind === 'danger') {
+    Object.assign(base, {
+      borderColor: `color-mix(in srgb, ${T.error} 45%, transparent)`,
+      color: T.error,
+      background: hover && !disabled ? `color-mix(in srgb, ${T.error} 12%, transparent)` : 'transparent',
+    })
+  } else if (kind === 'subtle') {
+    Object.assign(base, { borderColor: T.border, background: hover && !disabled ? T.active : T.l1 })
+  } else if (kind === 'text') {
+    Object.assign(base, { borderColor: 'transparent', height: 'auto', padding: 0, color: hover && !disabled ? T.link : T.textDim })
+  } else {
+    Object.assign(base, { borderColor: T.border, background: hover && !disabled ? T.hover : 'transparent', color: T.text })
+  }
+  return h('button', {
+    type: props.type ?? 'button',
+    title: props.title,
+    'aria-label': props['aria-label'] ?? props.title,
+    disabled,
+    onClick: disabled ? undefined : props.onClick,
+    ...bind,
+    style: base,
+  },
+    props.icon === undefined || props.icon === null ? null : h(Icon, { name: props.icon, size: small ? 12 : 14 }),
+    props.children)
+}
+
+/**
+ * Square icon-only button. Accepts `icon` (icon name) or `children` (any node).
+ */
+function IconBtn(props) {
+  const [hover, bind] = useHover()
+  const size = props.size ?? 26
+  const disabled = props.disabled === true
+  return h('button', {
+    type: 'button',
+    title: props.title,
+    'aria-label': props['aria-label'] ?? props.title,
+    disabled,
+    onClick: disabled ? undefined : props.onClick,
+    ...bind,
     style: {
-      display: 'inline-block', width: size, height: size, borderRadius: size,
-      border: `2px solid ${T.border}`, borderTopColor: T.brand,
-      animation: 'fwb-spin 0.8s linear infinite',
+      width: size,
+      height: size,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 0,
+      border: `1px solid ${props.active === true ? T.border : 'transparent'}`,
+      borderRadius: T.radiusSm,
+      background: hover && !disabled ? T.hover : props.active === true ? T.active : 'transparent',
+      color: props.active === true ? T.text : T.textDim,
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      opacity: disabled ? 0.5 : 1,
+      ...(props.style ?? {}),
+    },
+  },
+    props.children !== undefined && props.children !== null
+      ? props.children
+      : h(Icon, { name: props.icon ?? 'dot', size: props.iconSize ?? 14 }))
+}
+
+/**
+ * Pill / status tag.
+ * @param {{children?: any, tone?: string, style?: object, dot?: boolean, title?: string}} props
+ */
+function Pill(props) {
+  const colors = toneColors(props.tone)
+  return h('span', {
+    title: props.title,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '1px 7px',
+      borderRadius: T.radiusSm,
+      border: `1px solid ${colors.border}`,
+      background: colors.bg,
+      color: colors.fg,
+      fontSize: T.fsXs,
+      fontWeight: 600,
+      lineHeight: '16px',
+      whiteSpace: 'nowrap',
+      ...(props.style ?? {}),
+    },
+  },
+    props.dot === true ? h('span', { style: { width: 6, height: 6, borderRadius: 6, background: 'currentColor', flex: 'none' } }) : null,
+    props.children)
+}
+
+/** Toggle chip (filters, quick switches). */
+function Chip(props) {
+  const [hover, bind] = useHover()
+  const active = props.active === true
+  const disabled = props.disabled === true
+  return h('button', {
+    type: 'button',
+    title: props.title,
+    disabled,
+    onClick: disabled ? undefined : props.onClick,
+    'aria-pressed': active,
+    ...bind,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      height: 22,
+      padding: '0 8px',
+      borderRadius: T.radiusSm,
+      border: `1px solid ${active ? T.borderStrong : T.border}`,
+      background: active ? T.selected : hover && !disabled ? T.hover : 'transparent',
+      color: active ? T.text : T.textDim,
+      fontSize: T.fsXs,
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      opacity: disabled ? 0.5 : 1,
+      whiteSpace: 'nowrap',
+      ...(props.style ?? {}),
+    },
+  },
+    props.children,
+    props.count !== undefined && props.count !== null
+      ? h('span', { style: { color: active ? T.textDim : T.textFaint, fontVariantNumeric: 'tabular-nums' } }, String(props.count))
+      : null)
+}
+
+/** Surface card with an optional header and footer. */
+function Card(props) {
+  const hasHeader = props.title !== undefined || props.right !== undefined || props.subtitle !== undefined
+  return h('div', {
+    style: {
+      border: `1px solid ${T.border}`,
+      borderRadius: T.radius,
+      background: T.bgRaised,
+      minWidth: 0,
+      overflow: 'hidden',
+      ...(props.style ?? {}),
+    },
+  },
+    hasHeader
+      ? h('div', {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '8px 12px',
+          borderBottom: `1px solid ${T.border}`,
+          minHeight: 36,
+        },
+      },
+        h('div', { style: { display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 } },
+          h('div', { style: { fontWeight: 600, fontSize: T.fs, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, props.title),
+          props.subtitle !== undefined
+            ? h('div', { style: { color: T.textFaint, fontSize: T.fsXs, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, props.subtitle)
+            : null),
+        props.right ?? null)
+      : null,
+    h('div', { style: { padding: props.pad ?? 12, minWidth: 0 } }, props.children),
+    props.footer !== undefined && props.footer !== null
+      ? h('div', { style: { padding: '8px 12px', borderTop: `1px solid ${T.border}`, background: T.l1 } }, props.footer)
+      : null)
+}
+
+/** Label + control + hint/error wrapper. */
+function Field(props) {
+  const label = props.label
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, ...(props.style ?? {}) } },
+    label === undefined || label === null
+      ? null
+      : h('label', {
+        htmlFor: props.htmlFor,
+        style: { fontSize: T.fsXs, color: T.textDim, fontWeight: 500, display: 'flex', gap: 4, alignItems: 'center' },
+      },
+        label,
+        props.required === true ? h('span', { style: { color: T.error } }, '*') : null),
+    props.children,
+    props.error !== undefined && props.error !== null && props.error !== false
+      ? h('div', { style: { fontSize: T.fsXs, color: T.error } }, String(props.error))
+      : null,
+    props.hint !== undefined && props.hint !== null && props.hint !== false
+      ? h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, String(props.hint))
+      : null)
+}
+
+/**
+ * Text input. `onChange` receives `(value, event)`.
+ */
+function Input(props) {
+  const [focused, setFocused] = React.useState(false)
+  const disabled = props.disabled === true
+  const invalid = props.invalid === true
+  const small = props.size === 'sm'
+  return h('input', {
+    type: props.type ?? 'text',
+    value: props.value === undefined || props.value === null ? '' : String(props.value),
+    placeholder: props.placeholder,
+    disabled,
+    readOnly: props.readOnly === true,
+    spellCheck: false,
+    autoFocus: props.autoFocus === true,
+    'aria-invalid': invalid,
+    onChange: (event) => { if (props.onChange !== undefined) props.onChange(event.target.value, event) },
+    onKeyDown: (event) => {
+      if (props.onEnter !== undefined && event.key === 'Enter') props.onEnter(event.target.value, event)
+      if (props.onKeyDown !== undefined) props.onKeyDown(event)
+    },
+    onFocus: (event) => { setFocused(true); if (props.onFocus !== undefined) props.onFocus(event) },
+    onBlur: (event) => { setFocused(false); if (props.onBlur !== undefined) props.onBlur(event) },
+    style: {
+      height: small ? 24 : 28,
+      width: '100%',
+      minWidth: 0,
+      padding: '0 8px',
+      borderRadius: T.radiusSm,
+      border: `1px solid ${invalid ? T.error : focused ? T.borderStrong : T.border}`,
+      background: T.bgInput,
+      color: T.text,
+      fontSize: T.fsSm,
+      fontFamily: props.mono === true ? T.mono : T.font,
+      outline: 'none',
+      opacity: disabled ? 0.6 : 1,
+      ...(props.style ?? {}),
     },
   })
 }
 
-function Btn({ children, onClick, kind = 'ghost', disabled = false, title, style }) {
-  const palette = {
-    primary: { bg: T.brand, fg: 'var(--dsw-alias-text-on-brand, #fff)', border: T.brand },
-    ghost: { bg: 'transparent', fg: T.text, border: T.border },
-    danger: { bg: 'transparent', fg: T.error, border: T.border },
-  }[kind] ?? { bg: 'transparent', fg: T.text, border: T.border }
-  return h('button', {
-    type: 'button', title, disabled, onClick,
+/** Multi-line text input. `onChange` receives `(value, event)`. */
+function TextArea(props) {
+  return h('textarea', {
+    value: props.value === undefined || props.value === null ? '' : String(props.value),
+    placeholder: props.placeholder,
+    rows: props.rows ?? 3,
+    disabled: props.disabled === true,
+    spellCheck: false,
+    onChange: (event) => { if (props.onChange !== undefined) props.onChange(event.target.value, event) },
+    onKeyDown: props.onKeyDown,
     style: {
-      display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px',
-      borderRadius: T.radiusSm, border: `1px solid ${palette.border}`, background: palette.bg,
-      color: palette.fg, font: `inherit`, fontSize: T.fs, cursor: disabled ? 'not-allowed' : 'pointer',
-      opacity: disabled ? 0.5 : 1, ...style,
+      width: '100%',
+      minWidth: 0,
+      padding: '6px 8px',
+      borderRadius: T.radiusSm,
+      border: `1px solid ${props.invalid === true ? T.error : T.border}`,
+      background: T.bgInput,
+      color: T.text,
+      fontSize: T.fsSm,
+      lineHeight: '18px',
+      fontFamily: props.mono === true ? T.mono : T.font,
+      resize: props.resize ?? 'vertical',
+      outline: 'none',
+      ...(props.style ?? {}),
     },
-  }, children)
+  })
 }
 
-function Card({ children, style }) {
+/**
+ * Native select. `options` accepts `[{value,label}]` or `string[]`;
+ * `onChange` receives `(value, event)`.
+ */
+function Select(props) {
+  const raw = props.options ?? []
+  const options = raw.map((item) => (typeof item === 'string' || typeof item === 'number'
+    ? { value: String(item), label: String(item) }
+    : { value: String(item?.value ?? ''), label: String(item?.label ?? item?.value ?? '') }))
+  return h('select', {
+    value: props.value === undefined || props.value === null ? '' : String(props.value),
+    disabled: props.disabled === true,
+    title: props.title,
+    onChange: (event) => { if (props.onChange !== undefined) props.onChange(event.target.value, event) },
+    style: {
+      height: props.size === 'sm' ? 24 : 28,
+      width: '100%',
+      minWidth: 0,
+      padding: '0 6px',
+      borderRadius: T.radiusSm,
+      border: `1px solid ${T.border}`,
+      background: T.bgInput,
+      color: T.text,
+      fontSize: T.fsSm,
+      outline: 'none',
+      opacity: props.disabled === true ? 0.6 : 1,
+      ...(props.style ?? {}),
+    },
+  }, [
+    props.placeholder !== undefined && props.placeholder !== null
+      ? h('option', { key: '__placeholder', value: '' }, String(props.placeholder))
+      : null,
+    ...options.map((option, index) => h('option', { key: `${option.value}-${index}`, value: option.value }, option.label)),
+  ])
+}
+
+/** Checkbox with a clickable label. `onChange` receives `(checked, event)`. */
+function Checkbox(props) {
+  const checked = props.checked === true
+  return h('label', {
+    style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: props.disabled === true ? 'not-allowed' : 'pointer', fontSize: T.fsSm, ...(props.style ?? {}) },
+  },
+    h('input', {
+      type: 'checkbox',
+      checked,
+      disabled: props.disabled === true,
+      onChange: (event) => { if (props.onChange !== undefined) props.onChange(event.target.checked, event) },
+      style: { accentColor: T.brand, margin: 0, cursor: 'inherit' },
+    }),
+    props.label === undefined || props.label === null ? null : h('span', { style: { color: T.text } }, props.label))
+}
+
+/** Tab strip. `tabs` = `[{id,label,count?}]`. */
+function Tabs(props) {
+  const tabs = props.tabs ?? []
+  return h('div', {
+    role: 'tablist',
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 2,
+      borderBottom: `1px solid ${T.border}`,
+      ...(props.style ?? {}),
+    },
+  }, tabs.map((tab) => {
+    const active = tab.id === props.value
+    return h('button', {
+      key: tab.id,
+      type: 'button',
+      role: 'tab',
+      'aria-selected': active,
+      onClick: () => { if (props.onChange !== undefined) props.onChange(tab.id) },
+      style: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        height: 30,
+        padding: '0 10px',
+        border: 'none',
+        borderBottom: `2px solid ${active ? T.brand : 'transparent'}`,
+        background: 'transparent',
+        color: active ? T.text : T.textDim,
+        fontSize: T.fsSm,
+        fontWeight: active ? 600 : 500,
+        cursor: 'pointer',
+      },
+    },
+      tab.label,
+      tab.count === undefined || tab.count === null
+        ? null
+        : h('span', { style: { color: T.textFaint, fontSize: T.fsXs, fontVariantNumeric: 'tabular-nums' } }, String(tab.count)))
+  }))
+}
+
+/**
+ * Modal dialog. Mounted when `open` is undefined or true; Esc and a backdrop
+ * click call `onClose`. No portal — the caller's stacking context is used.
+ */
+function Modal(props) {
+  const open = props.open === undefined ? true : props.open === true
+  React.useEffect(() => {
+    if (open !== true) return undefined
+    const onKey = (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        if (props.onClose !== undefined) props.onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open, props.onClose])
+  if (open !== true) return null
+  const width = props.width ?? 520
   return h('div', {
     style: {
-      border: `1px solid ${T.border}`, borderRadius: T.radius, background: T.bgRaised,
-      padding: 12, ...style,
+      position: 'fixed',
+      inset: 0,
+      zIndex: 60,
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      padding: '48px 24px 24px',
+      background: T.overlay,
+      backdropFilter: 'blur(1px)',
     },
-  }, children)
+    onMouseDown: (event) => { if (event.target === event.currentTarget && props.onClose !== undefined) props.onClose() },
+  },
+    h('div', {
+      role: 'dialog',
+      'aria-modal': 'true',
+      style: {
+        width,
+        maxWidth: 'calc(100vw - 48px)',
+        maxHeight: 'calc(100vh - 96px)',
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 0,
+        background: T.bgRaised,
+        border: `1px solid ${T.borderStrong}`,
+        borderRadius: T.radius,
+        boxShadow: T.shadow,
+        overflow: 'hidden',
+      },
+    },
+      h('div', {
+        style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '10px 12px',
+          borderBottom: `1px solid ${T.border}`,
+          flexShrink: 0,
+        },
+      },
+        h('div', { style: { flex: 1, fontWeight: 600, fontSize: T.fs } }, props.title ?? ''),
+        h(IconBtn, { icon: 'x', title: t('common.close'), onClick: props.onClose })),
+      h('div', { className: 'fwb-scroll', style: { padding: 12, overflow: 'auto', minHeight: 0, flex: 1 } }, props.children),
+      props.footer !== undefined && props.footer !== null
+        ? h('div', {
+          style: {
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 8,
+            padding: '8px 12px',
+            borderTop: `1px solid ${T.border}`,
+            background: T.l1,
+            flexShrink: 0,
+          },
+        }, props.footer)
+        : null))
 }
 
-function Empty({ text }) {
-  return h('div', { style: { padding: 28, textAlign: 'center', color: T.textFaint, fontSize: T.fs } }, text ?? t('common.empty'))
+/** Toast stack (bottom-right). Pair with `useToast()`. */
+function ToastHost(props) {
+  const toasts = props.toasts ?? []
+  if (toasts.length === 0) return null
+  return h('div', {
+    style: {
+      position: 'absolute',
+      right: 14,
+      bottom: 34,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+      zIndex: 80,
+      maxWidth: 360,
+      pointerEvents: 'none',
+    },
+  }, toasts.map((toast) => {
+    const colors = toneColors(toast.tone)
+    return h('div', {
+      key: toast.id,
+      role: 'status',
+      style: {
+        pointerEvents: 'auto',
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 8,
+        padding: '7px 10px',
+        borderRadius: T.radiusSm,
+        border: `1px solid ${colors.border}`,
+        background: T.bgRaised,
+        boxShadow: T.shadow,
+        color: T.text,
+        fontSize: T.fsSm,
+      },
+    },
+      h('span', { style: { width: 6, height: 6, borderRadius: 6, background: colors.fg, marginTop: 6, flex: 'none' } }),
+      h('div', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word' } }, toast.message),
+      props.onDismiss !== undefined
+        ? h(IconBtn, { icon: 'x', size: 20, title: t('common.close'), onClick: () => props.onDismiss(toast.id) })
+        : null)
+  }))
 }
 
-function PageStub({ name }) {
+/** Centered empty state. */
+function Empty(props) {
+  const hasBody = props.body !== undefined || props.title !== undefined
+  return h('div', {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      padding: props.compact === true ? 16 : 32,
+      textAlign: 'center',
+      color: T.textFaint,
+      fontSize: T.fsSm,
+      minHeight: props.compact === true ? 0 : 120,
+      ...(props.style ?? {}),
+    },
+  },
+    props.icon === undefined || props.icon === null
+      ? (props.title === undefined && props.body === undefined && props.text !== undefined ? null : h(Icon, { name: props.icon ?? 'dot', size: 20 }))
+      : h(Icon, { name: props.icon, size: 20 }),
+    h('div', { style: { color: T.textDim, fontWeight: 600, fontSize: T.fs } }, props.title ?? props.text ?? t('common.empty')),
+    hasBody && props.body !== undefined ? h('div', { style: { maxWidth: 420, lineHeight: '18px' } }, props.body) : null,
+    props.action === undefined || props.action === null ? null : h('div', { style: { marginTop: 4 } }, props.action))
+}
+
+/** Spinner. */
+function Spinner(props) {
+  const size = props.size ?? 14
+  return h('span', {
+    role: 'progressbar',
+    'aria-label': props.label ?? t('common.loading'),
+    title: props.label,
+    style: {
+      display: 'inline-block',
+      width: size,
+      height: size,
+      borderRadius: size,
+      border: `2px solid ${T.border}`,
+      borderTopColor: props.color ?? T.brand,
+      animation: 'fwb-spin 0.8s linear infinite',
+      flex: 'none',
+      ...(props.style ?? {}),
+    },
+  })
+}
+
+/**
+ * Table with a sticky header. `columns` = `[{key, label, width, align, dim,
+ * nowrap, render(row,index)}]`.
+ */
+function Table(props) {
+  const columns = props.columns ?? []
+  const rows = props.rows ?? []
+  if (rows.length === 0) {
+    return h('div', { style: props.style },
+      props.empty === undefined ? h(Empty, { text: t('common.empty'), compact: true }) : props.empty)
+  }
+  const dense = props.dense === true
+  const cellPad = dense ? '3px 6px' : '5px 8px'
+  return h('div', {
+    className: 'fwb-scroll',
+    style: { overflow: 'auto', maxHeight: props.maxHeight ?? 'none', minWidth: 0, ...(props.style ?? {}) },
+  },
+    h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: T.fsSm, tableLayout: props.fixed === true ? 'fixed' : 'auto' } },
+      h('thead', null,
+        h('tr', null, columns.map((column, index) => h('th', {
+          key: column.key ?? index,
+          style: {
+            position: 'sticky',
+            top: 0,
+            zIndex: 1,
+            background: T.l1,
+            textAlign: column.align ?? 'left',
+            padding: cellPad,
+            borderBottom: `1px solid ${T.border}`,
+            color: T.textDim,
+            fontWeight: 600,
+            fontSize: T.fsXs,
+            whiteSpace: 'nowrap',
+            width: column.width,
+          },
+        }, column.label ?? column.key)))),
+      h('tbody', null, rows.map((row, rowIndex) => h('tr', {
+        key: props.rowKey === undefined ? rowIndex : String(props.rowKey(row, rowIndex)),
+        className: props.onRowClick === undefined ? undefined : 'fwb-row',
+        onClick: props.onRowClick === undefined ? undefined : () => props.onRowClick(row, rowIndex),
+        style: { cursor: props.onRowClick === undefined ? 'default' : 'pointer' },
+      }, columns.map((column, columnIndex) => h('td', {
+        key: column.key ?? columnIndex,
+        style: {
+          padding: cellPad,
+          borderBottom: `1px solid ${T.border}`,
+          verticalAlign: 'top',
+          textAlign: column.align ?? 'left',
+          color: column.dim === true ? T.textDim : T.text,
+          whiteSpace: column.nowrap === true ? 'nowrap' : 'normal',
+          wordBreak: column.wrap === true ? 'break-word' : 'normal',
+          fontFamily: column.mono === true ? T.mono : 'inherit',
+          fontVariantNumeric: 'tabular-nums',
+        },
+      }, column.render === undefined ? row?.[column.key] : column.render(row, rowIndex))))))),
+    props.caption === undefined ? null : h('div', { style: { padding: '4px 8px', color: T.textFaint, fontSize: T.fsXs } }, props.caption))
+}
+
+/**
+ * Two-pane layout with a draggable divider. Drag state is local; the width is
+ * optionally remembered in localStorage under `fwb.split.<storageKey>`.
+ */
+function SplitPane(props) {
+  const children = props.children === undefined || props.children === null
+    ? []
+    : (Array.isArray(props.children) ? props.children : [props.children])
+  const leftNode = props.left ?? children[0] ?? null
+  const rightNode = props.right ?? children[1] ?? null
+  const minWidth = props.minWidth ?? 240
+  const maxWidth = props.maxWidth ?? 760
+  const storageKey = props.storageKey
+  const [width, setWidth] = React.useState(() => {
+    const fallback = Number(props.leftWidth ?? 360)
+    if (storageKey === undefined) return fallback
+    try {
+      const raw = window.localStorage.getItem(`fwb.split.${storageKey}`)
+      const parsed = raw === null ? NaN : Number(raw)
+      return Number.isFinite(parsed) && parsed >= minWidth ? parsed : fallback
+    } catch {
+      return fallback
+    }
+  })
+  const dragRef = React.useRef(null)
+
+  React.useEffect(() => {
+    const onMove = (event) => {
+      const drag = dragRef.current
+      if (drag === null) return
+      setWidth(Math.max(minWidth, Math.min(maxWidth, drag.startWidth + (event.clientX - drag.startX))))
+    }
+    const onUp = () => {
+      if (dragRef.current === null) return
+      dragRef.current = null
+      setWidth((current) => {
+        if (storageKey !== undefined) {
+          try {
+            window.localStorage.setItem(`fwb.split.${storageKey}`, String(Math.round(current)))
+          } catch {
+            /* private mode */
+          }
+        }
+        return current
+      })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [minWidth, maxWidth, storageKey])
+
+  return h('div', {
+    style: { display: 'flex', flex: 1, minHeight: 0, minWidth: 0, ...(props.style ?? {}) },
+  },
+    h('div', { style: { width, flex: 'none', minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 } }, leftNode),
+    h('div', {
+      role: 'separator',
+      'aria-orientation': 'vertical',
+      onMouseDown: (event) => {
+        event.preventDefault()
+        dragRef.current = { startX: event.clientX, startWidth: width }
+      },
+      style: { width: 5, flex: 'none', cursor: 'col-resize', background: T.border, ...(props.dividerStyle ?? {}) },
+    }),
+    h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 } }, rightNode))
+}
+
+/** Horizontal action row. */
+function Toolbar(props) {
+  return h('div', {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: props.gap ?? 8,
+      padding: props.pad ?? '8px 12px',
+      flexWrap: props.wrap === false ? 'nowrap' : 'wrap',
+      borderBottom: props.bordered === true ? `1px solid ${T.border}` : 'none',
+      minWidth: 0,
+      ...(props.style ?? {}),
+    },
+  },
+    props.left ?? null,
+    props.children,
+    h('div', { style: { flex: 1 } }),
+    props.right ?? null)
+}
+
+/** Monospace text block. */
+function Mono(props) {
+  return h('span', {
+    style: {
+      fontFamily: T.mono,
+      fontSize: props.size ?? T.fsSm,
+      color: props.dim === true ? T.textDim : T.text,
+      whiteSpace: props.wrap === false ? 'pre' : 'pre-wrap',
+      wordBreak: 'break-word',
+      ...(props.style ?? {}),
+    },
+  }, props.children)
+}
+
+/** Keyboard keycap. */
+function Kbd(props) {
+  return h('kbd', {
+    style: {
+      display: 'inline-block',
+      padding: '0 4px',
+      minWidth: 16,
+      textAlign: 'center',
+      borderRadius: T.radiusXs ?? T.radiusSm,
+      border: `1px solid ${T.border}`,
+      borderBottomWidth: 2,
+      background: T.l2,
+      color: T.textDim,
+      fontFamily: T.mono,
+      fontSize: T.fsXs,
+      lineHeight: '15px',
+      ...(props.style ?? {}),
+    },
+  }, props.children)
+}
+
+/** Hover tooltip; falls back to the native title while hovering. */
+function Tooltip(props) {
+  const [hover, bind] = useHover()
+  return h('span', {
+    style: { position: 'relative', display: 'inline-flex', minWidth: 0 },
+    ...bind,
+  },
+    props.children,
+    hover === true && props.text !== undefined
+      ? h('span', {
+        role: 'tooltip',
+        style: {
+          position: 'absolute',
+          top: 'calc(100% + 4px)',
+          left: 0,
+          zIndex: 30,
+          padding: '3px 6px',
+          borderRadius: T.radiusSm,
+          border: `1px solid ${T.border}`,
+          background: T.bgRaised,
+          color: T.text,
+          fontSize: T.fsXs,
+          whiteSpace: 'nowrap',
+          boxShadow: T.shadow,
+          pointerEvents: 'none',
+        },
+      }, props.text)
+      : null)
+}
+
+/** Determinate progress bar. */
+function ProgressBar(props) {
+  const max = Number(props.max ?? 100) || 100
+  const raw = Number(props.value ?? 0)
+  const pct = Math.max(0, Math.min(1, Number.isFinite(raw) ? raw / max : 0))
+  const colors = toneColors(props.tone ?? 'brand')
+  return h('div', {
+    title: props.title,
+    style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, ...(props.style ?? {}) },
+  },
+    h('div', {
+      style: { height: props.height ?? 6, borderRadius: 4, background: T.l2, overflow: 'hidden' },
+    }, h('div', { style: { width: `${pct * 100}%`, height: '100%', background: colors.fg, transition: 'width 120ms linear' } })),
+    props.label === undefined ? null : h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, props.label))
+}
+
+/** Numeric badge for nav counts. */
+function Badge(props) {
+  const value = Number(props.count ?? 0)
+  if (!Number.isFinite(value) || (value === 0 && props.dot !== true)) return null
+  const colors = toneColors(props.tone ?? 'neutral')
+  const text = value > (props.max ?? 99) ? `${props.max ?? 99}+` : String(value)
+  return h('span', {
+    title: props.title,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: 16,
+      height: 16,
+      padding: '0 4px',
+      borderRadius: 8,
+      background: colors.bg,
+      color: colors.fg,
+      fontSize: 10,
+      fontWeight: 700,
+      fontVariantNumeric: 'tabular-nums',
+      ...(props.style ?? {}),
+    },
+  }, text)
+}
+
+/** Placeholder page used while a fragment is still being built. */
+function PageStub(props) {
   return h('div', { style: { padding: 20 } },
-    h(Card, null,
-      h('div', { style: { fontWeight: 600, marginBottom: 6 } }, name),
-      h('div', { style: { color: T.textDim, fontSize: T.fs } }, t('boot.placeholder'))))
+    h(Card, { title: props.name ?? t('nav.section') },
+      h('div', { style: { color: T.textDim, fontSize: T.fsSm } }, t('boot.placeholder'))))
 }
+
+/* Styles are cosmetic but useful before the first page mounts. */
+ensureStyles()
 
     /* ==== 10-shell.js ==== */
 /* ====================================================================== *
  * 10-shell.js — owner: dev-ui-core
- * WorkbenchApp: header, left rail, page switch, status bar.
- * PLACEHOLDER shell so the panel renders before the real one lands.
+ *
+ * WorkbenchApp: the registered `main` panel. Header (project switcher, run
+ * phase + controls, device chip, DevTools link, connection indicator), left
+ * rail with per-page counts, a scrollable content area that renders one page
+ * component, a command palette (Ctrl/Cmd+K) and a status bar.
+ *
+ * Page components are *called*, never defined here: RuntimePage and LogsPage
+ * live in 20/30, NetworkPage / BoardPage / QualityPage / SettingsPage belong
+ * to 40/50/60. Every reference is resolved behind a `typeof` guard so a
+ * missing fragment renders a fallback instead of blanking the panel.
  * ====================================================================== */
 
-const PAGES = [
-  { id: 'runtime', labelKey: 'nav.runtime', render: (props) => h(RuntimePage, props) },
-  { id: 'logs', labelKey: 'nav.logs', render: (props) => h(LogsPage, props) },
-  { id: 'network', labelKey: 'nav.network', render: (props) => h(NetworkPage, props) },
-  { id: 'board', labelKey: 'nav.board', render: (props) => h(BoardPage, props) },
-  { id: 'quality', labelKey: 'nav.quality', render: (props) => h(QualityPage, props) },
-  { id: 'settings', labelKey: 'nav.settings', render: (props) => h(SettingsPage, props) },
+/** Nav entries. `badge` names a counter slot from useApiState().counters. */
+const FWB_PAGES = [
+  { id: 'runtime', labelKey: 'nav.runtime', icon: 'runtime', badge: null },
+  { id: 'logs', labelKey: 'nav.logs', icon: 'logs', badge: 'logs' },
+  { id: 'network', labelKey: 'nav.network', icon: 'network', badge: 'network' },
+  { id: 'board', labelKey: 'nav.board', icon: 'board', badge: 'tasks' },
+  { id: 'quality', labelKey: 'nav.quality', icon: 'quality', badge: 'errors' },
+  { id: 'settings', labelKey: 'nav.settings', icon: 'gear', badge: null },
 ]
 
-function readStoredPage() {
-  try {
-    const stored = sessionStorage.getItem('fwb.page')
-    return stored !== null && PAGES.some((page) => page.id === stored) ? stored : 'runtime'
-  } catch {
-    return 'runtime'
+/**
+ * Lazy page resolution. Each entry is a thunk so `typeof` guards the identifier
+ * at call time — a fragment that is not in the bundle yields null, not a
+ * ReferenceError.
+ */
+const FWB_PAGE_COMPONENTS = {
+  runtime: () => (typeof RuntimePage === 'function' ? RuntimePage : null),
+  logs: () => (typeof LogsPage === 'function' ? LogsPage : null),
+  network: () => (typeof NetworkPage === 'function' ? NetworkPage : null),
+  board: () => (typeof BoardPage === 'function' ? BoardPage : null),
+  quality: () => (typeof QualityPage === 'function' ? QualityPage : null),
+  settings: () => (typeof SettingsPage === 'function' ? SettingsPage : null),
+}
+
+/** Page id safety net shared by the nav and the stored selection. */
+function isKnownPage(id) {
+  return FWB_PAGES.some((page) => page.id === id)
+}
+
+/** Shared button style for nav rows so hover/active look consistent. */
+function navRowStyle(active) {
+  return {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    width: '100%',
+    height: 30,
+    padding: '0 8px',
+    borderRadius: T.radiusSm,
+    border: '1px solid transparent',
+    background: active === true ? T.selected : 'transparent',
+    color: active === true ? T.text : T.textDim,
+    fontSize: T.fsSm,
+    fontWeight: active === true ? 600 : 500,
+    cursor: 'pointer',
+    textAlign: 'left',
   }
 }
 
-function WorkbenchApp() {
-  const [page, setPage] = React.useState(readStoredPage)
-  const state = useApiState()
-
-  const selectPage = React.useCallback((next) => {
-    setPage(next)
-    try {
-      sessionStorage.setItem('fwb.page', next)
-    } catch {
-      /* private mode */
-    }
-  }, [])
-
-  React.useEffect(() => {
-    if (typeof state?.actions?.refreshAll === 'function') state.actions.refreshAll()
-  }, [state])
-
-  const active = PAGES.find((entry) => entry.id === page) ?? PAGES[0]
-
-  return h('div', {
+/** Small connection dot. */
+function ConnDot({ ok, tone }) {
+  const colors = toneColors(tone ?? (ok === true ? 'ok' : 'error'))
+  return h('span', {
     style: {
-      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
-      color: T.text, fontSize: T.fs, fontFamily: T.font, background: T.bg,
+      width: 7,
+      height: 7,
+      borderRadius: 7,
+      flex: 'none',
+      background: colors.fg,
+      boxShadow: `0 0 0 2px ${colors.bg}`,
+    },
+  })
+}
+
+/** Error boundary so one broken page cannot blank the whole panel. */
+class PageBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error: error ?? new Error('render failed') }
+  }
+
+  componentDidCatch(error) {
+    console.error('[flutter-workbench] page render failed', error)
+  }
+
+  render() {
+    if (this.state.error !== null) {
+      const message = this.state.error?.message ?? String(this.state.error)
+      return h('div', { style: { padding: 16 } },
+        h(Card, { title: this.props.pageLabel ?? t('nav.section') },
+          h('div', { style: { color: T.error, fontSize: T.fsSm, whiteSpace: 'pre-wrap' } },
+            t('shell.errorBoundary', { message }),
+            h('div', { style: { marginTop: 8 } },
+              h(Btn, { onClick: () => this.setState({ error: null }) }, t('common.retry'))))))
+    }
+    return this.props.children
+  }
+}
+
+/** Fallback for a page whose fragment is not in the bundle. */
+function MissingPage({ pageLabel }) {
+  return h('div', { style: { padding: 16 } },
+    h(Card, { title: t('shell.fallbackTitle', { page: pageLabel }) },
+      h('div', { style: { color: T.textDim, fontSize: T.fsSm, lineHeight: '19px' } }, t('shell.fallbackBody'))))
+}
+
+/** Device label used by the header chip. */
+function deviceChipLabel(state) {
+  const activeRun = (state?.runs ?? []).find((run) => run.runId === state?.activeRunId) ?? null
+  const runDevice = activeRun?.device ?? null
+  if (runDevice !== null && runDevice !== undefined) {
+    return { label: runDevice.name ?? runDevice.id ?? t('shell.device'), tone: 'ok', title: `${runDevice.platform ?? ''}`.trim() }
+  }
+  const devices = state?.devices ?? []
+  if (devices.length > 0) {
+    const device = devices[0]
+    return { label: device.name ?? device.id ?? t('shell.device'), tone: 'neutral', title: `${t('runtime.deviceCount', { n: devices.length })}` }
+  }
+  return { label: t('shell.deviceMissing'), tone: 'neutral', title: t('shell.deviceMissing') }
+}
+
+/**
+ * Command list for the palette. Rebuilt on every open so it reflects the live
+ * run/snapshot. Actions are invoked directly.
+ */
+function buildPaletteItems(state, actions, selectPage) {
+  const items = FWB_PAGES.map((page) => ({
+    id: `page:${page.id}`,
+    group: 'pages',
+    label: t(page.labelKey),
+    hint: page.id,
+    icon: page.icon,
+    run: () => selectPage(page.id),
+  }))
+  const activeRun = (state?.runs ?? []).find((run) => run.runId === state?.activeRunId) ?? null
+  const phase = activeRun?.phase ?? 'idle'
+  const live = ['running', 'reloading', 'restarting'].includes(phase)
+  const commands = [
+    { id: 'run.start', label: t('runtime.start'), icon: 'play', disable: state?.activeProjectId === undefined || state?.activeProjectId === null, run: () => actions.startRun === undefined ? undefined : actions.startRun() },
+    { id: 'run.check', label: t('run.active'), icon: 'terminal', run: () => selectPage('runtime') },
+    { id: 'run.reload', label: t('runtime.reload'), icon: 'reload', disable: !live, run: () => (actions.hotReload === undefined ? undefined : actions.hotReload()) },
+    { id: 'run.restart', label: t('runtime.restart'), icon: 'restart', disable: !live, run: () => (actions.hotRestart === undefined ? undefined : actions.hotRestart()) },
+    { id: 'run.stop', label: t('runtime.stop'), icon: 'stop', disable: activeRun === null, run: () => (actions.stopRun === undefined ? undefined : actions.stopRun()) },
+    { id: 'shell.refresh', label: t('common.refresh'), icon: 'refresh', run: () => (actions.refreshAll === undefined ? undefined : actions.refreshAll()) },
+    { id: 'shell.addProject', label: t('shell.addProject'), icon: 'plus', run: () => selectPage('runtime') },
+    { id: 'shell.devtools', label: t('runtime.openDevtools'), icon: 'external', disable: activeRun?.vmServiceUri === null || activeRun?.vmServiceUri === undefined, run: () => openDevtools(activeRun) },
+    { id: 'shell.copyVm', label: t('shell.copyVmUri'), icon: 'copy', disable: activeRun?.vmServiceUri === null || activeRun?.vmServiceUri === undefined, run: () => copyVmUri(activeRun, actions) },
+  ]
+  return [...items, ...commands.filter((item) => !item.disable).concat(commands.filter((item) => item.disable))]
+}
+
+/** Open DevTools for a run (or report why it is not possible). */
+function openDevtools(activeRun) {
+  const url = activeRun?.devtoolsUrl ?? (activeRun?.vmServiceUri === null || activeRun?.vmServiceUri === undefined
+    ? null
+    : `https://devtools.flutter.dev/?uri=${encodeURIComponent(activeRun.vmServiceUri)}`)
+  if (url === null) return false
+  try {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Copy the VM service URI of the active run. */
+async function copyVmUri(activeRun, actions) {
+  const uri = activeRun?.vmServiceUri ?? ''
+  if (uri === '') {
+    if (actions?.toast !== undefined) actions.toast(t('shell.vmUriMissing'), 'warn')
+    return false
+  }
+  const ok = await copyText(uri)
+  if (actions?.toast !== undefined) actions.toast(ok ? t('common.copied') : t('common.copyFailed'), ok ? 'ok' : 'error')
+  return ok
+}
+
+/** Command palette: page jumps plus run/home actions. */
+function CommandPalette({ state, actions, onClose, selectPage }) {
+  const [query, setQuery] = React.useState('')
+  const [index, setIndex] = React.useState(0)
+  const items = React.useMemo(() => buildPaletteItems(state, actions, (id) => {
+    selectPage(id)
+    onClose()
+  }), [state, actions, selectPage, onClose])
+  const filtered = React.useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (needle === '') return items
+    return items.filter((item) => item.label.toLowerCase().includes(needle) || item.id.toLowerCase().includes(needle))
+  }, [items, query])
+
+  React.useEffect(() => { setIndex(0) }, [query])
+
+  const execute = React.useCallback((item) => {
+    if (item === null || item === undefined) return
+    if (item.disable === true) return
+    try {
+      if (item.run !== undefined) item.run()
+    } catch (error) {
+      console.error('[flutter-workbench] palette command failed', error)
+    }
+    onClose()
+  }, [onClose])
+
+  const onKeyDown = (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setIndex((current) => Math.min(filtered.length - 1, current + 1))
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setIndex((current) => Math.max(0, current - 1))
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      execute(filtered[index] ?? null)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      onClose()
+    }
+  }
+
+  const pages = filtered.filter((item) => item.group === 'pages')
+  const commands = filtered.filter((item) => item.group !== 'pages')
+
+  return h(Modal, { title: t('shell.palette'), onClose, width: 560, footer: h('span', { style: { fontSize: T.fsXs, color: T.textFaint } }, t('shell.paletteHint')) },
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+      h(Input, {
+        value: query,
+        onChange: setQuery,
+        onKeyDown,
+        autoFocus: true,
+        placeholder: t('shell.palettePlaceholder'),
+      }),
+      h('div', { className: 'fwb-scroll', style: { maxHeight: 360, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 2 } },
+        filtered.length === 0 ? h(Empty, { text: t('shell.paletteEmpty'), compact: true }) : null,
+        pages.length > 0 ? h('div', { style: { fontSize: T.fsXs, color: T.textFaint, padding: '4px 6px' } }, t('shell.palettePages')) : null,
+        pages.map((item) => paletteRow(item, filtered.indexOf(item) === index, execute)),
+        commands.length > 0 ? h('div', { style: { fontSize: T.fsXs, color: T.textFaint, padding: '6px 6px 4px' } }, t('shell.paletteActions')) : null,
+        commands.map((item) => paletteRow(item, filtered.indexOf(item) === index, execute)))))
+}
+
+/** One palette row. */
+function paletteRow(item, active, execute) {
+  const [hover, bind] = useHover()
+  return h('button', {
+    key: item.id,
+    type: 'button',
+    'data-active': active,
+    onMouseEnter: bind.onMouseEnter,
+    onMouseLeave: bind.onMouseLeave,
+    onClick: () => execute(item),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      width: '100%',
+      height: 28,
+      padding: '0 8px',
+      borderRadius: T.radiusSm,
+      border: '1px solid transparent',
+      background: active === true ? T.selected : hover ? T.hover : 'transparent',
+      color: item.disable === true ? T.textFaint : T.text,
+      fontSize: T.fsSm,
+      cursor: 'pointer',
+      textAlign: 'left',
     },
   },
-    h('style', null, '@keyframes fwb-spin { to { transform: rotate(360deg) } }'),
-    h('div', {
+    h(Icon, { name: item.icon ?? 'dot', size: 13 }),
+    h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.label),
+    h('span', { style: { color: T.textFaint, fontSize: T.fsXs, fontFamily: T.mono } }, item.hint ?? ''))
+}
+
+/**
+ * The registered main panel: `main` slot key `flutter-workbench`.
+ * @returns {any} full-height workbench layout.
+ */
+function WorkbenchApp() {
+  ensureStyles()
+  const state = useApiState()
+  const actions = state.actions ?? {}
+  const [page, setPage] = useSessionState('fwb.page', 'runtime')
+  const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [addPath, setAddPath] = React.useState('')
+  const [addBusy, setAddBusy] = React.useState(false)
+  const [, bumpLocale] = React.useReducer((value) => value + 1, 0)
+
+  const activePage = isKnownPage(page) ? page : 'runtime'
+  React.useEffect(() => {
+    if (activePage !== page) setPage('runtime')
+  }, [activePage, page, setPage])
+
+  const selectPage = React.useCallback((id) => {
+    if (isKnownPage(id)) setPage(id)
+  }, [setPage])
+
+  const runs = state.runs ?? []
+  const activeRun = runs.find((run) => run.runId === state.activeRunId) ?? null
+  const phase = activeRun?.phase ?? 'idle'
+  const live = phase === 'running' || phase === 'reloading' || phase === 'restarting'
+  const busy = phase === 'starting' || phase === 'stopping' || phase === 'reloading' || phase === 'restarting'
+  const projects = state.projects ?? []
+  const counters = state.counters ?? {}
+  const conn = state.conn ?? { ok: false, error: null }
+  const chip = deviceChipLabel(state)
+  const devtoolsUrl = activeRun?.devtoolsUrl !== null && activeRun?.devtoolsUrl !== undefined
+    ? activeRun.devtoolsUrl
+    : (activeRun?.vmServiceUri !== null && activeRun?.vmServiceUri !== undefined
+      ? `https://devtools.flutter.dev/?uri=${encodeURIComponent(activeRun.vmServiceUri)}`
+      : null)
+
+  /* ---- keyboard: Ctrl/Cmd+K palette, Esc overlay, R refresh logs ------- */
+  React.useEffect(() => {
+    const onKey = (event) => {
+      const meta = event.ctrlKey === true || event.metaKey === true
+      if (meta && (event.key === 'k' || event.key === 'K')) {
+        event.preventDefault()
+        setPaletteOpen((open) => !open)
+        return
+      }
+      if (meta || event.altKey === true) return
+      if (event.key === 'Escape') {
+        if (paletteOpen === true) {
+          event.preventDefault()
+          setPaletteOpen(false)
+        }
+        return
+      }
+      if (isTypingTarget(event.target) === true) return
+      if (activePage === 'logs' && (event.key === 'r' || event.key === 'R')) {
+        event.preventDefault()
+        try {
+          window.dispatchEvent(new CustomEvent('fwb:logs-refresh'))
+        } catch {
+          /* older engines: the LogsPage hit refresh itself */
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [activePage, paletteOpen])
+
+  const submitAddProject = React.useCallback(async () => {
+    const path = addPath.trim()
+    if (path === '') {
+      actions.toast?.(t('shell.addProjectEmpty'), 'warn')
+      return
+    }
+    setAddBusy(true)
+    try {
+      const result = await (actions.addProject === undefined ? Promise.reject(new Error(t('common.error'))) : actions.addProject(path))
+      const project = result?.project ?? null
+      actions.toast?.(t('shell.projectAdded', { name: project?.name ?? path }), 'ok')
+      setAddOpen(false)
+      setAddPath('')
+      if (project?.id !== undefined && actions.selectProject !== undefined) await actions.selectProject(project.id)
+    } catch (error) {
+      actions.toast?.(t('common.actionFailed', { message: error?.message ?? String(error) }), 'error')
+    } finally {
+      setAddBusy(false)
+    }
+  }, [addPath, actions])
+
+  const removeActiveProject = React.useCallback(async () => {
+    const project = projects.find((item) => item.id === state.activeProjectId) ?? null
+    if (project === null) return
+    const ok = typeof window.confirm === 'function' ? window.confirm(t('shell.removeProjectConfirm', { name: project.name ?? project.path })) : true
+    if (ok !== true) return
+    try {
+      await (actions.removeProject === undefined ? Promise.reject(new Error(t('common.error'))) : actions.removeProject(project.id))
+      actions.toast?.(t('shell.projectRemoved'), 'ok')
+    } catch (error) {
+      actions.toast?.(t('common.actionFailed', { message: error?.message ?? String(error) }), 'error')
+    }
+  }, [actions, projects, state.activeProjectId])
+
+  const toggleLocale = React.useCallback(() => {
+    setActiveLocale(currentLocale === 'zh' ? 'en' : 'zh')
+    bumpLocale()
+  }, [bumpLocale])
+
+  const pageDef = FWB_PAGES.find((item) => item.id === activePage) ?? FWB_PAGES[0]
+  const resolve = FWB_PAGE_COMPONENTS[activePage]
+  const PageComponent = resolve === undefined ? null : resolve()
+  const pageNode = typeof PageComponent === 'function'
+    ? h(PageComponent, { state, actions })
+    : h(MissingPage, { pageLabel: t(pageDef.labelKey) })
+
+  const runAction = (name, quiet) => async () => {
+    const fn = actions[name]
+    if (fn === undefined) return
+    try {
+      await fn()
+    } catch (error) {
+      if (quiet !== true) actions.toast?.(t('common.actionFailed', { message: error?.message ?? String(error) }), 'error')
+    }
+  }
+
+  return h('div', {
+    className: 'fwb-root',
+    style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden', position: 'relative' },
+  },
+    /* ---------------------------------------------------------------- header */
+    h('header', {
       style: {
-        display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-        borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        height: 46,
+        padding: '0 10px',
+        borderBottom: `1px solid ${T.border}`,
+        background: T.l1,
+        flexShrink: 0,
+        minWidth: 0,
       },
     },
-      h('strong', { style: { fontSize: 14 } }, 'Flutter'),
-      h('span', { style: { color: T.textFaint } }, 'workbench'),
-      h('div', { style: { flex: 1 } }),
-      state?.conn?.ok === false && h('span', { style: { color: T.error } }, t('state.offline')),
-      h(Btn, { onClick: () => state?.actions?.refreshAll?.() }, t('common.refresh'))),
-    h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } },
-      h('nav', {
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 } },
+        h('span', {
+          style: {
+            width: 22, height: 22, borderRadius: T.radiusSm, display: 'inline-flex',
+            alignItems: 'center', justifyContent: 'center',
+            background: `color-mix(in srgb, ${T.brand} 18%, transparent)`, color: T.brand,
+          },
+        }, h(Icon, { name: 'terminal', size: 14 })),
+        h('div', { style: { display: 'flex', flexDirection: 'column', lineHeight: '14px' } },
+          h('strong', { style: { fontSize: T.fs } }, t('shell.title')),
+          h('span', { style: { fontSize: 10, color: T.textFaint } }, t('shell.subtitle')))),
+      h('div', { style: { width: 1, height: 22, background: T.border, flexShrink: 0 } }),
+      /* project switcher */
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, width: 232, flexShrink: 1 } },
+        h(Select, {
+          value: state.activeProjectId ?? '',
+          options: projects.map((project) => ({ value: project.id, label: project.name ?? project.path ?? project.id })),
+          placeholder: projects.length === 0 ? t('shell.noProject') : t('shell.projectPlaceholder'),
+          title: t('shell.projectPlaceholder'),
+          onChange: (value) => { if (value !== '' && actions.selectProject !== undefined) actions.selectProject(value).catch((error) => actions.toast?.(t('common.actionFailed', { message: error?.message ?? String(error) }), 'error')) },
+          style: { height: 26 },
+        }),
+        h(IconBtn, { icon: 'plus', title: t('shell.addProject'), onClick: () => setAddOpen(true) }),
+        h(IconBtn, {
+          icon: 'trash',
+          title: t('shell.removeProject'),
+          disabled: state.activeProjectId === undefined || state.activeProjectId === null,
+          onClick: removeActiveProject,
+        })),
+      /* phase + run controls */
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 } },
+        h(Pill, { tone: statusTone(phase), dot: true, title: activeRun?.runId ?? t('shell.noRun') }, t(`phase.${phase}`, {})),
+        h(Btn, {
+          kind: 'primary',
+          size: 'sm',
+          icon: 'play',
+          title: t('runtime.start'),
+          disabled: state.activeProjectId === undefined || state.activeProjectId === null || busy,
+          onClick: runAction('startRun'),
+        }, t('runtime.start')),
+        h(IconBtn, { icon: 'reload', title: t('runtime.reload'), disabled: !live, onClick: runAction('hotReload') }),
+        h(IconBtn, { icon: 'restart', title: t('runtime.restart'), disabled: !live, onClick: runAction('hotRestart') }),
+        h(IconBtn, { icon: 'stop', title: t('runtime.stop'), disabled: activeRun === null || phase === 'stopping' || phase === 'stopped', onClick: runAction('stopRun') })),
+      h('div', { style: { flex: 1, minWidth: 8 } }),
+      /* device chip */
+      h('button', {
+        type: 'button',
+        title: chip.title ?? t('shell.device'),
+        onClick: () => selectPage('runtime'),
         style: {
-          width: 132, flexShrink: 0, borderRight: `1px solid ${T.border}`,
-          display: 'flex', flexDirection: 'column', padding: 6, gap: 2,
+          display: 'inline-flex', alignItems: 'center', gap: 5, height: 24, padding: '0 8px',
+          borderRadius: T.radiusSm, border: `1px solid ${T.border}`, background: 'transparent',
+          color: T.textDim, fontSize: T.fsXs, cursor: 'pointer', maxWidth: 180, overflow: 'hidden', flexShrink: 0,
         },
       },
-        PAGES.map((entry) => h('button', {
-          key: entry.id, type: 'button', onClick: () => selectPage(entry.id),
+        h(Icon, { name: 'device', size: 12 }),
+        h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, chip.label)),
+      /* DevTools */
+      devtoolsUrl === null
+        ? h(Btn, { size: 'sm', icon: 'external', disabled: true, title: t('runtime.devtoolsNeedsRun') }, t('shell.devtools'))
+        : h('a', {
+          href: devtoolsUrl,
+          target: '_blank',
+          rel: 'noreferrer noopener',
+          title: t('runtime.openDevtools'),
           style: {
-            textAlign: 'left', padding: '7px 10px', borderRadius: T.radiusSm,
-            border: '1px solid transparent',
-            background: entry.id === page ? T.bgInput : 'transparent',
-            color: entry.id === page ? T.text : T.textDim,
-            cursor: 'pointer', font: 'inherit', fontSize: T.fs,
+            display: 'inline-flex', alignItems: 'center', gap: 5, height: 24, padding: '0 8px',
+            borderRadius: T.radiusSm, border: `1px solid ${T.border}`, color: T.text,
+            textDecoration: 'none', fontSize: T.fsXs, flexShrink: 0,
           },
-        }, t(entry.labelKey)))),
-      h('main', { style: { flex: 1, minWidth: 0, overflow: 'auto' } },
-        active.render({ state }))),
-    h('div', {
+        }, h(Icon, { name: 'external', size: 12 }), t('shell.devtools')),
+      /* connection + polling */
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, fontSize: T.fsXs, color: conn.ok === true ? T.textDim : T.error }, title: conn.error?.message ?? t('shell.connected') },
+        h(ConnDot, { ok: conn.ok === true }),
+        h('span', { style: { maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+          conn.ok === true ? t('shell.connected') : t('shell.disconnected'))),
+      h(IconBtn, {
+        icon: state.paused === true ? 'play' : 'pause',
+        title: state.paused === true ? t('shell.resumePolling') : t('shell.pausePolling'),
+        active: state.paused === true,
+        onClick: () => actions.setPaused?.(state.paused !== true),
+      }),
+      h(IconBtn, { icon: 'search', title: t('shell.palette'), onClick: () => setPaletteOpen(true) })),
+
+    /* ---- offline banner ------------------------------------------------ */
+    conn.ok === true ? null : h('div', {
       style: {
-        display: 'flex', gap: 12, padding: '4px 12px', borderTop: `1px solid ${T.border}`,
-        color: T.textFaint, fontSize: 11, flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 8, padding: '5px 12px',
+        background: `color-mix(in srgb, ${T.error} 12%, transparent)`,
+        borderBottom: `1px solid color-mix(in srgb, ${T.error} 35%, transparent)`,
+        color: T.error, fontSize: T.fsXs, flexShrink: 0,
       },
     },
-      h('span', null, state?.snapshot?.activeRunId ?? '—'),
-      h('span', null, `${state?.snapshot?.counters?.logs ?? 0} logs`)))
+      h(Icon, { name: 'warn', size: 13 }),
+      h('span', { style: { flex: 1, minWidth: 0 } }, conn.error === null || conn.error === undefined
+        ? t('state.connecting')
+        : t('shell.offlineBody', { message: conn.error.message ?? String(conn.error) })),
+      h(Btn, { size: 'sm', onClick: () => actions.refreshAll?.() }, t('common.retry'))),
+
+    /* ---- body ---------------------------------------------------------- */
+    h('div', { style: { display: 'flex', flex: 1, minHeight: 0, minWidth: 0 } },
+      h('nav', {
+        style: {
+          width: 190, flexShrink: 0, borderRight: `1px solid ${T.border}`, background: T.l1,
+          display: 'flex', flexDirection: 'column', padding: 6, gap: 2, minHeight: 0,
+        },
+      },
+        h('div', { style: { padding: '4px 8px 6px', fontSize: 10, letterSpacing: 0.4, textTransform: 'uppercase', color: T.textFaint } }, t('nav.section')),
+        FWB_PAGES.map((item) => {
+          const active = item.id === activePage
+          const count = item.badge === null ? 0 : Number(counters[item.badge] ?? 0)
+          return h('button', {
+            key: item.id,
+            type: 'button',
+            className: 'fwb-row',
+            title: t(item.labelKey),
+            onClick: () => selectPage(item.id),
+            style: navRowStyle(active),
+          },
+            h(Icon, { name: item.icon, size: 14 }),
+            h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, t(item.labelKey)),
+            h(Badge, { count, tone: item.id === 'quality' ? 'error' : item.id === 'board' ? 'brand' : 'neutral' }))
+        }),
+        h('div', { style: { flex: 1 } }),
+        state.paused === true ? h('div', { style: { padding: '4px 8px', fontSize: T.fsXs, color: T.warnLabel } }, t('shell.paused')) : null,
+        h('button', {
+          type: 'button',
+          className: 'fwb-row',
+          onClick: () => setPaletteOpen(true),
+          style: navRowStyle(false),
+        },
+          h(Icon, { name: 'search', size: 13 }),
+          h('span', { style: { flex: 1, textAlign: 'left' } }, t('shell.palette')),
+          h(Kbd, null, '⌘K')),
+        h('button', {
+          type: 'button',
+          className: 'fwb-row',
+          onClick: toggleLocale,
+          title: t('shell.switchLocale'),
+          style: navRowStyle(false),
+        },
+          h(Icon, { name: 'file', size: 13 }),
+          h('span', { style: { flex: 1, textAlign: 'left' } }, t('shell.locale')),
+          h('span', { style: { fontSize: T.fsXs, color: T.textFaint } }, currentLocale === 'zh' ? '中' : 'EN'))),
+      h('main', {
+        className: 'fwb-scroll',
+        style: { flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' },
+      },
+        h(PageBoundary, { key: activePage, pageLabel: t(pageDef.labelKey) }, pageNode))),
+
+    /* ---- status bar ---------------------------------------------------- */
+    h('footer', {
+      style: {
+        display: 'flex', alignItems: 'center', gap: 12, height: 26, padding: '0 10px',
+        borderTop: `1px solid ${T.border}`, background: T.l1, color: T.textFaint,
+        fontSize: 11, flexShrink: 0, minWidth: 0,
+      },
+    },
+      h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } },
+        h(ConnDot, { ok: conn.ok === true }),
+        h('span', { style: { color: T.textDim } }, activeRun?.runId ?? t('shell.noRun'))),
+      activeRun === null ? null : h('span', null, t(`phase.${phase}`, {})),
+      h('span', null, t('shell.logsCount', { n: Number(counters.logs ?? 0) })),
+      h('span', null, t('shell.errorsCount', { n: Number(counters.errors ?? 0) })),
+      h('span', { style: { flex: 1 } }),
+      state.paused === true ? h('span', { style: { color: T.warnLabel } }, t('shell.paused')) : null,
+      h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, h(Kbd, null, '⌘K'), t('shell.hintPalette')),
+      h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, h(Kbd, null, 'R'), t('shell.hintRefreshLogs')),
+      h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, h(Kbd, null, 'Esc'), t('shell.hintEsc'))),
+
+    /* ---- overlays ------------------------------------------------------ */
+    paletteOpen ? h(CommandPalette, {
+      state,
+      actions,
+      selectPage,
+      onClose: () => setPaletteOpen(false),
+    }) : null,
+
+    addOpen ? h(Modal, {
+      title: t('shell.addProjectTitle'),
+      onClose: () => setAddOpen(false),
+      width: 520,
+      footer: [
+        h(Btn, { key: 'cancel', onClick: () => setAddOpen(false) }, t('common.cancel')),
+        h(Btn, { key: 'add', kind: 'primary', disabled: addBusy, onClick: submitAddProject }, addBusy ? t('common.loading') : t('common.add')),
+      ],
+    },
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+        h(Field, { label: t('runtime.project'), hint: t('shell.addProjectHint') },
+          h(Input, {
+            value: addPath,
+            onChange: setAddPath,
+            onEnter: submitAddProject,
+            placeholder: t('shell.addProjectPlaceholder'),
+            mono: true,
+            autoFocus: true,
+          })))) : null,
+
+    h(ToastHost, { toasts: state.toasts ?? [], onDismiss: (id) => actions.dismissToast?.(id) })
+  )
 }
 
     /* ==== 20-runtime.js ==== */
@@ -372,13 +3192,1407 @@ function NetworkPage({ state }) {
     /* ==== 50-board.js ==== */
 /* ====================================================================== *
  * 50-board.js — owner: dev-ui-data
- * BoardPage: lanes, drag & drop, add/edit modal, AI decompose, dispatch.
- * PLACEHOLDER: replace with the real implementation per docs/CONTRACTS.md §8.2.
+ *
+ * BoardPage: the AI-driven kanban board (docs/CONTRACTS.md §4 Task shape,
+ * §6 board routes, §8.2 state/actions).
+ *
+ *   lanes    backlog → ready → running → review → verify → done, each with a
+ *            live count; cards drag between lanes and reorder inside a lane
+ *            (HTML5 drag events) with a keyboard/menu alternative
+ *   moves    optimistic + rollback + error toast; entering `done` needs
+ *            result.verdict === 'pass', otherwise a confirm/force path
+ *   author   quick-add composer in the backlog header, editor modal
+ *            (title/detail/acceptance/verify/files/priority/tags),
+ *            "AI 拆解" dialog POST /board/decompose
+ *   agent    per-card dispatch / report / cancel / open session, agent status,
+ *            result and history timeline; AI-working cards and cards awaiting
+ *            human acceptance are visually distinct
+ *   strip    compact "我的待验收" summary at the top of the page
+ *
+ * Kit surface consumed: Btn, IconBtn, Pill, Chip, Card, Field, Input, TextArea,
+ * Select, Modal, Empty, Spinner, Mono, t. Shared helpers come from 40-network.js
+ * (fwbActions, fwbInvoke, fwbLines, fwbReadValue, fwbClock, fwbAgo, fwbCopy,
+ * useFwbNotify, FwbPage, FwbNotice).
  * ====================================================================== */
 
-function BoardPage({ state }) {
-  return h(PageStub, { name: t('nav.board') })
+/* ------------------------------------------------------------ constants -- */
+
+const FWB_BOARD_LANES = ['backlog', 'ready', 'running', 'review', 'verify', 'done']
+const FWB_BOARD_LANE_FALLBACK = FWB_BOARD_LANES.map((id, order) => ({ id, label: id, order }))
+const FWB_BOARD_PRIORITIES = ['low', 'normal', 'high', 'urgent']
+const FWB_BOARD_PRIORITY_RANK = { low: 1, normal: 2, high: 3, urgent: 4 }
+/** Lanes where a human still has to sign the card off. */
+const FWB_BOARD_REVIEW_LANES = ['review', 'verify']
+
+function fwbClamp(value, lo, hi) {
+  const n = Number(value)
+  if (Number.isFinite(n) === false) return lo
+  return Math.min(hi, Math.max(lo, n))
 }
+
+function fwbBoardLaneLabel(id) {
+  if (FWB_BOARD_LANES.includes(id)) return t(`board.lane.${id}`)
+  return String(id ?? '?')
+}
+
+function fwbBoardLaneTone(id) {
+  if (id === 'running') return 'brand'
+  if (id === 'review' || id === 'verify') return 'warn'
+  if (id === 'done') return 'ok'
+  if (id === 'ready') return 'info'
+  return 'neutral'
+}
+
+function fwbBoardPriorityLabel(id) {
+  return FWB_BOARD_PRIORITIES.includes(id) ? t(`board.priority.${id}`) : String(id ?? '')
+}
+
+function fwbBoardPriorityTone(id) {
+  if (id === 'urgent') return 'error'
+  if (id === 'high') return 'warn'
+  if (id === 'low') return 'muted'
+  return 'neutral'
+}
+
+function fwbBoardSort(a, b) {
+  const oa = Number(a?.order)
+  const ob = Number(b?.order)
+  const left = Number.isFinite(oa) ? oa : Number.MAX_SAFE_INTEGER
+  const right = Number.isFinite(ob) ? ob : Number.MAX_SAFE_INTEGER
+  if (left !== right) return left - right
+  return (Number(a?.createdAt) || 0) - (Number(b?.createdAt) || 0)
+}
+
+/** True while an agent is (or is about to be) holding the card. */
+function fwbBoardAgentActive(task) {
+  const status = task?.agent?.status
+  return status === 'working' || status === 'queued'
+}
+
+/** True when the card is waiting for a human decision. */
+function fwbBoardAwaitingAcceptance(task) {
+  if (task === null || task === undefined) return false
+  if (FWB_BOARD_REVIEW_LANES.includes(task.lane)) return true
+  return task.result?.verdict === 'pass' && task.lane !== 'done'
+}
+
+function fwbBoardAgentLabel(task) {
+  const status = task?.agent?.status
+  if (status === 'working') return t('board.agentWorking')
+  if (status === 'queued') return t('board.agentQueued')
+  if (status === 'blocked') return t('board.agentBlocked')
+  if (status === 'done') return t('board.agentDone')
+  if (status === 'failed') return t('board.agentFailed')
+  return t('board.agentIdle')
+}
+
+/**
+ * Group tasks into lanes for rendering, applying an in-flight optimistic move
+ * (`override = { id, lane, index }`) without touching server state. Lanes that
+ * only exist in the data (older boards) are appended so nothing disappears.
+ */
+function fwbBoardBuckets(laneList, tasks, override) {
+  const laneIds = laneList.map((lane) => lane.id)
+  const buckets = new Map()
+  for (const id of laneIds) buckets.set(id, [])
+  const hasOverride = override !== null && override !== undefined && typeof override.id === 'string'
+  let moved = null
+
+  for (const task of tasks) {
+    if (hasOverride === true && task?.id === override.id) {
+      moved = task
+      continue
+    }
+    const laneId = typeof task?.lane === 'string' && task.lane !== '' ? task.lane : 'backlog'
+    if (buckets.has(laneId) === false) buckets.set(laneId, [])
+    buckets.get(laneId).push(task)
+  }
+  for (const list of buckets.values()) list.sort(fwbBoardSort)
+  if (hasOverride === true && moved !== null) {
+    const laneId = buckets.has(override.lane) ? override.lane : (moved.lane ?? 'backlog')
+    const list = buckets.get(laneId) ?? []
+    const index = Number.isInteger(override.index) ? fwbClamp(override.index, 0, list.length) : list.length
+    list.splice(index, 0, { ...moved, lane: laneId })
+    buckets.set(laneId, list)
+  }
+  return laneIds.map((id) => ({ id, items: buckets.get(id) ?? [] }))
+}
+
+/** Filter predicate for the board toolbar. */
+function fwbBoardMatches(task, filters) {
+  if (task === null || task === undefined) return false
+  if (filters.projectId !== '' && String(task.projectId ?? '') !== filters.projectId) return false
+  if (filters.priority !== '' && String(task.priority ?? 'normal') !== filters.priority) return false
+  if (filters.tag !== '') {
+    const tags = Array.isArray(task.tags) ? task.tags : []
+    if (tags.includes(filters.tag) === false) return false
+  }
+  if (filters.text !== '') {
+    const needle = filters.text.toLowerCase()
+    const haystack = [task.title, task.detail, ...(Array.isArray(task.tags) ? task.tags : [])]
+      .map((part) => String(part ?? '').toLowerCase())
+      .join('\n')
+    if (haystack.includes(needle) === false) return false
+  }
+  return true
+}
+
+/** Poll GET /board (the board is the app's primary data source). */
+function useFwbBoard(intervalMs) {
+  const poll = usePoll(() => api('/board'), intervalMs, [])
+  const payload = poll.data ?? null
+  const board = payload?.board ?? payload ?? null
+  const tasks = Array.isArray(board?.tasks) ? board.tasks : []
+  const laneList = Array.isArray(board?.lanes) && board.lanes.length > 0
+    ? [...board.lanes].sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
+    : FWB_BOARD_LANE_FALLBACK
+  return {
+    board,
+    tasks,
+    laneList,
+    loading: poll.loading === true,
+    error: poll.error ?? null,
+    refresh: poll.refresh,
+  }
+}
+
+/** "command | status | exitCode" lines → the report payload shape. */
+function fwbBoardParseCommands(text) {
+  return fwbLines(text).map((line) => {
+    const parts = line.split('|').map((part) => part.trim())
+    const exit = Number(parts[2])
+    const status = parts[1] === 'failed' ? 'failed' : 'passed'
+    return { command: parts[0] ?? '', status, exitCode: Number.isFinite(exit) ? exit : null }
+  }).filter((row) => row.command !== '')
+}
+
+function fwbBoardCommandsText(rows) {
+  if (Array.isArray(rows) === false) return ''
+  return rows.map((row) => [row?.command ?? '', row?.status ?? 'passed', row?.exitCode ?? ''].join(' | ')).join('\n')
+}
+
+/* ------------------------------------------------------------- composer -- */
+
+/** Quick-add composer pinned to the top of the backlog column. */
+function FwbBoardQuickAdd({ onCreate, busy }) {
+  const [draft, setDraft] = React.useState('')
+  const submit = async () => {
+    const title = draft.trim()
+    if (title === '') return
+    const ok = await onCreate(title)
+    if (ok === true) setDraft('')
+  }
+  return h('div', { style: { display: 'flex', gap: 4, padding: '6px 6px 4px' } },
+    h(Input, {
+      value: draft,
+      onChange: (next) => setDraft(String(fwbReadValue(next) ?? '')),
+      onKeyDown: (event) => {
+        if (event?.key === 'Enter' && event.shiftKey !== true) {
+          event.preventDefault()
+          submit()
+        }
+      },
+      onEnter: () => submit(),
+      placeholder: t('board.quickAdd'),
+      title: t('board.quickAddHint'),
+      size: 'sm',
+      style: { flex: 1, minWidth: 0 },
+    }),
+    h(Btn, { onClick: submit, kind: 'primary', disabled: busy === true || draft.trim() === '', style: { padding: '4px 8px' } }, busy === true ? h(Spinner, { size: 12 }) : t('board.add')))
+}
+
+/* ----------------------------------------------------------------- card -- */
+
+function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, onOpen, onDragStart, onDragEnd, onDragOverCard, onDropAt, onMenu, onMoveLane, onKeyMove, busy, onDispatch, onReport, onCancelAgent, onOpenSession }) {
+  const agentActive = fwbBoardAgentActive(task)
+  const awaiting = fwbBoardAwaitingAcceptance(task)
+  const blocked = task?.blocked === true || task?.agent?.status === 'blocked'
+  const verdict = task?.result?.verdict ?? null
+  const acceptance = Array.isArray(task?.acceptance) ? task.acceptance : []
+  const verify = Array.isArray(task?.verify) ? task.verify : []
+  const files = Array.isArray(task?.files) ? task.files : []
+  const tags = Array.isArray(task?.tags) ? task.tags : []
+  const history = Array.isArray(task?.history) ? task.history : []
+
+  let border = T.border
+  if (blocked === true) border = T.error
+  else if (agentActive === true) border = T.brand
+  else if (awaiting === true) border = T.warn
+
+  return h('div', {
+    draggable: true,
+    tabIndex: 0,
+    role: 'listitem',
+    'data-task-id': task?.id,
+    title: t('board.openHint'),
+    onDragStart: (event) => {
+      try {
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/plain', String(task?.id ?? ''))
+        event.dataTransfer.setData('application/x-fwb-task', String(task?.id ?? ''))
+      } catch (error) {
+        /* some engines refuse custom types; the ref fallback still works */
+      }
+      onDragStart()
+    },
+    onDragEnd,
+    onDragOver: (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      onDragOverCard()
+    },
+    onDrop: (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      onDropAt(index)
+    },
+    onClick: onOpen,
+    onKeyDown: (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        onOpen()
+        return
+      }
+      if ((event.ctrlKey === true || event.metaKey === true) && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        event.preventDefault()
+        onKeyMove(event.key === 'ArrowLeft' ? -1 : 1)
+      }
+    },
+    style: {
+      position: 'relative', textAlign: 'left', cursor: 'grab', padding: '7px 8px', margin: '3px 6px',
+      border: `1px solid ${border}`, borderLeft: `3px solid ${border}`,
+      borderRadius: T.radiusSm, background: T.bgRaised, color: T.text, font: 'inherit',
+      fontSize: 12, opacity: dragging === true ? 0.45 : 1,
+      boxShadow: dropTarget === true ? `0 0 0 2px ${T.brand}` : 'none',
+      outline: 'none',
+    },
+  },
+    h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 6 } },
+      h('div', { style: { flex: 1, minWidth: 0, fontWeight: 600, lineHeight: 1.35, overflowWrap: 'anywhere' } }, String(task?.title ?? '')),
+      h(IconBtn, {
+        onClick: (event) => {
+          if (event !== undefined && event !== null && typeof event.stopPropagation === 'function') event.stopPropagation()
+          onMenu()
+        },
+        title: t('board.moveTo'),
+        size: 'sm',
+        active: menuOpen === true,
+        style: { flexShrink: 0 },
+      }, '⋯')),
+
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 } },
+      h(Pill, { tone: fwbBoardPriorityTone(task?.priority), style: { fontSize: 10 } }, fwbBoardPriorityLabel(task?.priority)),
+      agentActive === true ? h(Pill, { tone: 'brand', dot: true, style: { fontSize: 10 } }, `${fwbBoardAgentLabel(task)}`) : null,
+      awaiting === true ? h(Pill, { tone: 'warn', style: { fontSize: 10, color: T.warn } }, t('board.awaitingAcceptance')) : null,
+      blocked === true ? h(Pill, { tone: 'error', style: { fontSize: 10, color: T.error } }, t('board.blocked')) : null,
+      verdict === 'pass' ? h(Pill, { tone: 'ok', style: { fontSize: 10, color: T.ok } }, t('board.verdictPass')) : null,
+      verdict === 'fail' ? h(Pill, { tone: 'error', style: { fontSize: 10, color: T.error } }, t('board.verdictFail')) : null),
+
+    tags.length > 0
+      ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 3, marginTop: 4 } },
+        tags.slice(0, 4).map((tag) => h('span', {
+          key: String(tag),
+          style: { fontSize: 10, padding: '1px 5px', borderRadius: 99, border: `1px solid ${T.border}`, color: T.textDim },
+        }, String(tag))),
+        tags.length > 4 ? h('span', { style: { fontSize: 10, color: T.textFaint } }, `+${tags.length - 4}`) : null)
+      : null,
+
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 5, color: T.textFaint, fontSize: 10 } },
+      acceptance.length > 0 ? h('span', null, t('board.acceptanceCount', { n: acceptance.length })) : null,
+      verify.length > 0 ? h('span', null, t('board.verifyCount', { n: verify.length })) : null,
+      files.length > 0 ? h('span', null, t('board.filesCount', { n: files.length })) : null,
+      history.length > 0 ? h('span', null, `${t('board.history')} ${history.length}`) : null),
+
+    // Per-card agent buttons: they stop propagation so a click never opens the modal.
+    h('div', {
+      style: { display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 },
+      onClick: (event) => event.stopPropagation(),
+    },
+      agentActive === false
+        ? h(Btn, { onClick: onDispatch, kind: 'primary', disabled: busy === true, title: t('board.dispatchHint'), style: { padding: '2px 7px', fontSize: 11 } },
+          busy === true ? t('board.dispatching') : t('board.dispatch'))
+        : null,
+      h(Btn, { onClick: onReport, title: t('board.reportHint'), style: { padding: '2px 7px', fontSize: 11 } }, t('board.report')),
+      agentActive === true ? h(Btn, { onClick: onCancelAgent, kind: 'danger', style: { padding: '2px 7px', fontSize: 11 } }, t('board.cancel')) : null,
+      task?.agent?.sessionId !== null && task?.agent?.sessionId !== undefined
+        ? h(Btn, { onClick: onOpenSession, style: { padding: '2px 7px', fontSize: 11 } }, t('board.openSession'))
+        : null),
+
+    menuOpen === true
+      ? h('div', {
+        style: {
+          position: 'absolute', right: 4, top: 22, zIndex: 20, minWidth: 130, padding: 4,
+          border: `1px solid ${T.borderStrong}`, borderRadius: T.radiusSm, background: T.bgRaised,
+          boxShadow: `0 6px 18px ${T.overlay ?? 'rgba(0,0,0,0.3)'}`,
+        },
+        onClick: (event) => event.stopPropagation(),
+      },
+        h('div', { style: { fontSize: 10, color: T.textFaint, padding: '2px 4px 4px' } }, t('board.moveTo')),
+        menuLanes.map((lane) => h('button', {
+          key: lane.id,
+          type: 'button',
+          disabled: lane.id === task?.lane,
+          onClick: () => onMoveLane(lane.id),
+          style: {
+            display: 'block', width: '100%', textAlign: 'left', padding: '3px 6px', margin: '1px 0',
+            border: 'none', borderRadius: T.radiusSm, background: 'transparent', color: T.text,
+            font: 'inherit', fontSize: 11, cursor: lane.id === task?.lane ? 'default' : 'pointer',
+            opacity: lane.id === task?.lane ? 0.45 : 1,
+          },
+        }, fwbBoardLaneLabel(lane.id))),
+        h('div', { style: { borderTop: `1px solid ${T.border}`, marginTop: 3, paddingTop: 3 } },
+          h('button', {
+            type: 'button',
+            onClick: onOpen,
+            style: { display: 'block', width: '100%', textAlign: 'left', padding: '3px 6px', border: 'none', background: 'transparent', color: T.text, font: 'inherit', fontSize: 11, cursor: 'pointer', borderRadius: T.radiusSm },
+          }, t('board.edit'))))
+      : null)
+}
+
+/* ---------------------------------------------------------------- modal -- */
+
+/** Card detail + editor: acceptance checklist, verify commands, history, result. */
+function FwbBoardCardModal({ task, act, laneList, provider, model, onClose, onChanged, push, onOpenSession }) {
+  const [editing, setEditing] = React.useState(() => task?.id === null || task?.id === undefined)
+  const [draft, setDraft] = React.useState(() => ({
+    title: String(task?.title ?? ''),
+    detail: String(task?.detail ?? ''),
+    acceptance: (Array.isArray(task?.acceptance) ? task.acceptance : []).join('\n'),
+    verify: (Array.isArray(task?.verify) ? task.verify : []).join('\n'),
+    files: (Array.isArray(task?.files) ? task.files : []).join('\n'),
+    priority: String(task?.priority ?? 'normal'),
+    tags: (Array.isArray(task?.tags) ? task.tags : []).join(', '),
+  }))
+  const [busy, setBusy] = React.useState(false)
+
+  const acceptance = Array.isArray(task?.acceptance) ? task.acceptance : []
+  const verify = Array.isArray(task?.verify) ? task.verify : []
+  const files = Array.isArray(task?.files) ? task.files : []
+  const history = Array.isArray(task?.history) ? task.history : []
+  const result = task?.result ?? null
+  const isNew = task?.id === null || task?.id === undefined
+
+  const save = async () => {
+    if (draft.title.trim() === '') {
+      push(t('board.titleRequired'), 'warn')
+      return
+    }
+    setBusy(true)
+    const patch = {
+      title: draft.title.trim(),
+      detail: draft.detail,
+      acceptance: fwbLines(draft.acceptance),
+      verify: fwbLines(draft.verify),
+      files: fwbLines(draft.files),
+      priority: draft.priority,
+      tags: String(draft.tags ?? '').split(',').map((tag) => tag.trim()).filter((tag) => tag !== ''),
+    }
+    try {
+      if (isNew === true) {
+        const input = { ...patch, lane: 'backlog' }
+        await fwbInvoke(act, 'createTask', [input], () => api('/board/task', { method: 'POST', body: { action: 'create', ...input } }))
+        push(t('board.created'), 'ok')
+        if (typeof onChanged === 'function') onChanged()
+        onClose()
+        return
+      }
+      await fwbInvoke(act, 'updateTask', [{ id: task.id, patch }], () => api('/board/task', { method: 'POST', body: { action: 'update', id: task.id, patch } }))
+      push(t('board.saved'), 'ok')
+      setEditing(false)
+      if (typeof onChanged === 'function') onChanged()
+    } catch (error) {
+      push(`${t('board.saveFailed')}: ${String(error?.message ?? error)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async () => {
+    setBusy(true)
+    try {
+      await fwbInvoke(act, 'deleteTask', [task.id], () => api('/board/task', { method: 'POST', body: { action: 'delete', id: task.id } }))
+      push(t('board.deleted'), 'ok')
+      if (typeof onChanged === 'function') onChanged()
+      onClose()
+    } catch (error) {
+      push(`${t('board.deleteFailed')}: ${String(error?.message ?? error)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const dispatch = async () => {
+    setBusy(true)
+    try {
+      const payload = { id: task.id }
+      if (provider !== '') payload.provider = provider
+      if (model !== '') payload.model = model
+      const response = await fwbInvoke(act, 'dispatchTask', [payload], () => api('/board/dispatch', { method: 'POST', body: payload }))
+      const sessionId = response?.sessionId ?? response?.task?.agent?.sessionId ?? '—'
+      push(t('board.dispatchOk', { id: String(sessionId) }), 'ok')
+      if (typeof onChanged === 'function') onChanged()
+    } catch (error) {
+      push(`${t('board.dispatchFailed')}: ${String(error?.message ?? error)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const view = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 } },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+      h(Pill, { tone: fwbBoardLaneTone(task?.lane) }, fwbBoardLaneLabel(task?.lane)),
+      h(Pill, { tone: fwbBoardPriorityTone(task?.priority) }, fwbBoardPriorityLabel(task?.priority)),
+      h(Pill, { tone: fwbBoardAgentActive(task) ? 'brand' : 'neutral' }, `${t('board.agent')}: ${fwbBoardAgentLabel(task)}`),
+      result?.verdict === 'pass' ? h(Pill, { tone: 'ok', style: { color: T.ok } }, t('board.verdictPass')) : null,
+      result?.verdict === 'fail' ? h(Pill, { tone: 'error', style: { color: T.error } }, t('board.verdictFail')) : null,
+      task?.blocked === true ? h(Pill, { tone: 'error', style: { color: T.error } }, t('board.blocked')) : null),
+
+    task?.detail !== null && task?.detail !== undefined && String(task.detail) !== ''
+      ? h('div', { style: { whiteSpace: 'pre-wrap', lineHeight: 1.6, color: T.text } }, String(task.detail))
+      : h('div', { style: { color: T.textFaint } }, t('board.noDetail')),
+
+    h(Card, { title: t('board.acceptanceTitle'), style: { padding: 8 } },
+      acceptance.length === 0
+        ? h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('board.noAcceptance'))
+        : h('ol', { style: { margin: 0, paddingLeft: 18, lineHeight: 1.7 } },
+          acceptance.map((item, index) => h('li', { key: `acc-${index}` }, String(item))))),
+
+    h(Card, { title: t('board.verifyTitle'), style: { padding: 8 } },
+      verify.length === 0
+        ? h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('board.noVerify'))
+        : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+          verify.map((command, index) => h('div', { key: `ver-${index}`, style: { display: 'flex', alignItems: 'center', gap: 6 } },
+            h(Mono, { style: { flex: 1, minWidth: 0, fontSize: 11, overflowWrap: 'anywhere' } }, String(command)),
+            h(FwbCopyBtn, { value: String(command), label: t('net.copy'), notify: push }))))),
+
+    files.length > 0
+      ? h(Card, { title: t('board.filesTitle'), style: { padding: 8 } },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+          files.map((file, index) => h('div', { key: `file-${index}`, style: { display: 'flex', alignItems: 'center', gap: 6 } },
+            h(Mono, { style: { flex: 1, minWidth: 0, fontSize: 11, overflowWrap: 'anywhere' } }, String(file)),
+            h(Btn, {
+              style: { padding: '2px 6px', fontSize: 11 },
+              onClick: () => {
+                const target = String(file).split(':')
+                const line = Number(target[1])
+                fwbInvoke(act, 'openFile', [target[0], Number.isFinite(line) ? line : undefined], () => api('/open', { method: 'POST', body: { file: target[0], line: Number.isFinite(line) ? line : undefined } }))
+                  .catch((issue) => push(String(issue?.message ?? issue), 'error'))
+              },
+            }, t('board.openFile'))))))
+      : null,
+
+    result !== null && result !== undefined
+      ? h(Card, { title: t('board.result'), style: { padding: 8 } },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          String(result.summary ?? '') !== '' ? h('div', { style: { whiteSpace: 'pre-wrap' } }, String(result.summary)) : null,
+          Array.isArray(result.commandsRun) && result.commandsRun.length > 0
+            ? h('div', null,
+              h('div', { style: { color: T.textFaint, fontSize: 11, marginBottom: 2 } }, t('board.commands')),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                result.commandsRun.map((row, index) => h('div', { key: `cmd-${index}`, style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                  h(Pill, { tone: row?.status === 'failed' ? 'error' : 'ok', style: { fontSize: 10, color: row?.status === 'failed' ? T.error : T.ok } }, String(row?.status ?? 'passed')),
+                  h(Mono, { style: { flex: 1, minWidth: 0, fontSize: 11, overflowWrap: 'anywhere' } }, String(row?.command ?? '')),
+                  Number.isFinite(Number(row?.exitCode)) ? h('span', { style: { color: T.textFaint, fontSize: 10 } }, `exit ${row.exitCode}`) : null))))
+            : null,
+          Array.isArray(result.evidence) && result.evidence.length > 0
+            ? h('div', null,
+              h('div', { style: { color: T.textFaint, fontSize: 11, marginBottom: 2 } }, t('board.evidence')),
+              h('ul', { style: { margin: 0, paddingLeft: 16, lineHeight: 1.6 } },
+                result.evidence.map((item, index) => h('li', { key: `ev-${index}` }, String(item)))))
+            : null))
+      : h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('board.resultEmpty')),
+
+    h(Card, { title: t('board.history'), style: { padding: 8 } },
+      history.length === 0
+        ? h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('board.historyEmpty'))
+        : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 0, position: 'relative' } },
+          [...history].reverse().map((entry, index) => h('div', {
+            key: `hist-${index}`,
+            style: { display: 'flex', gap: 8, padding: '3px 0', borderLeft: `2px solid ${T.border}`, paddingLeft: 8, marginLeft: 2 },
+          },
+            h('span', { style: { color: T.textFaint, fontSize: 10, width: 74, flexShrink: 0 } }, fwbClock(entry?.at)),
+            h('span', { style: { flex: 1, minWidth: 0, fontSize: 11 } },
+              `${entry?.from === null || entry?.from === undefined ? '·' : fwbBoardLaneLabel(entry.from)} → ${fwbBoardLaneLabel(entry?.to)}`,
+              entry?.note !== null && entry?.note !== undefined && String(entry.note) !== '' ? ` · ${String(entry.note)}` : '',
+              h('span', { style: { color: T.textFaint } }, ` (${String(entry?.by ?? '—')})`))))) ),
+
+    task?.agent?.lastReport !== null && task?.agent?.lastReport !== undefined
+      ? h(Card, { title: t('board.lastReport'), style: { padding: 8 } },
+        h('div', { style: { whiteSpace: 'pre-wrap', fontSize: 11, lineHeight: 1.6 } }, String(task.agent.lastReport)))
+      : null)
+
+  const form = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 } },
+    h(Field, { label: t('board.title') },
+      h(Input, { value: draft.title, onChange: (next) => setDraft((prev) => ({ ...prev, title: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+    h(Field, { label: t('board.detail') },
+      h(TextArea, { value: draft.detail, rows: 4, onChange: (next) => setDraft((prev) => ({ ...prev, detail: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+    h(Field, { label: t('board.acceptance'), hint: t('board.oneLineEach') },
+      h(TextArea, { value: draft.acceptance, rows: 4, onChange: (next) => setDraft((prev) => ({ ...prev, acceptance: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+    h(Field, { label: t('board.verify'), hint: t('board.oneLineEach') },
+      h(TextArea, { value: draft.verify, rows: 3, mono: true, onChange: (next) => setDraft((prev) => ({ ...prev, verify: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+    h(Field, { label: t('board.files'), hint: t('board.oneLineEach') },
+      h(TextArea, { value: draft.files, rows: 3, mono: true, onChange: (next) => setDraft((prev) => ({ ...prev, files: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+    h('div', { style: { display: 'flex', gap: 10 } },
+      h(Field, { label: t('board.priority'), style: { flex: 1 } },
+        h(Select, {
+          value: draft.priority,
+          onChange: (next) => setDraft((prev) => ({ ...prev, priority: String(fwbReadValue(next) ?? 'normal') })),
+          options: FWB_BOARD_PRIORITIES.map((id) => ({ value: id, label: fwbBoardPriorityLabel(id) })),
+          style: { width: '100%' },
+        })),
+      h(Field, { label: t('board.tags'), hint: t('board.tagsHint'), style: { flex: 2 } },
+        h(Input, { value: draft.tags, onChange: (next) => setDraft((prev) => ({ ...prev, tags: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } }))))
+
+  const footer = editing === true
+    ? h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+      h(Btn, { onClick: () => (isNew === true ? onClose() : setEditing(false)), disabled: busy }, t('board.close')),
+      h(Btn, { onClick: save, kind: 'primary', disabled: busy }, busy === true ? h(Spinner, { size: 12 }) : (isNew === true ? t('board.create') : t('board.save'))))
+    : h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'flex-end' } },
+      isNew === true ? null : h(Btn, { onClick: remove, kind: 'danger', disabled: busy }, t('board.delete')),
+      task?.agent?.sessionId !== null && task?.agent?.sessionId !== undefined ? h(Btn, { onClick: onOpenSession }, t('board.openSession')) : null,
+      isNew === true ? null : h(Btn, { onClick: dispatch, disabled: busy }, t('board.dispatch')),
+      h(Btn, { onClick: () => setEditing(true), kind: 'primary' }, t('board.edit')),
+      h(Btn, { onClick: onClose }, t('board.close')))
+
+  return h(Modal, {
+    title: isNew === true ? t('board.new') : String(task?.title ?? t('board.edit')),
+    onClose,
+    width: 720,
+    footer,
+  },
+    editing === true ? form : view)
+}
+
+/* --------------------------------------------------------------- report -- */
+
+function FwbBoardReportModal({ task, act, onClose, onChanged, push }) {
+  const [form, setForm] = React.useState(() => ({
+    status: 'done',
+    summary: String(task?.agent?.lastReport ?? ''),
+    commands: fwbBoardCommandsText(task?.result?.commandsRun),
+    evidence: (Array.isArray(task?.result?.evidence) ? task.result.evidence : []).join('\n'),
+    files: (Array.isArray(task?.result?.files) ? task.result.files : []).join('\n'),
+    verdict: task?.result?.verdict ?? '',
+    note: '',
+  }))
+  const [busy, setBusy] = React.useState(false)
+
+  const submit = async () => {
+    setBusy(true)
+    const payload = {
+      id: task.id,
+      status: form.status,
+      summary: form.summary,
+      commandsRun: fwbBoardParseCommands(form.commands),
+      evidence: fwbLines(form.evidence),
+      files: fwbLines(form.files),
+      verdict: form.verdict === '' ? null : form.verdict,
+      note: form.note === '' ? null : form.note,
+    }
+    try {
+      await fwbInvoke(act, 'reportTask', [payload], () => api('/board/report', { method: 'POST', body: payload }))
+      push(t('board.reportOk'), 'ok')
+      if (typeof onChanged === 'function') onChanged()
+      onClose()
+    } catch (error) {
+      push(`${t('board.reportFailed')}: ${String(error?.message ?? error)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return h(Modal, {
+    title: t('board.reportTitle'),
+    onClose,
+    width: 640,
+    footer: h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+      h(Btn, { onClick: onClose, disabled: busy }, t('board.close')),
+      h(Btn, { onClick: submit, kind: 'primary', disabled: busy }, busy === true ? h(Spinner, { size: 12 }) : t('board.reportSave'))),
+  },
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 } },
+      h('div', { style: { display: 'flex', gap: 10 } },
+        h(Field, { label: t('board.status'), style: { flex: 1 } },
+          h(Select, {
+            value: form.status,
+            onChange: (next) => setForm((prev) => ({ ...prev, status: String(fwbReadValue(next) ?? 'done') })),
+            options: ['done', 'failed', 'blocked', 'working'].map((id) => ({ value: id, label: t(`board.reportStatus.${id}`) })),
+            style: { width: '100%' },
+          })),
+        h(Field, { label: t('board.verdict'), style: { flex: 1 } },
+          h(Select, {
+            value: form.verdict,
+            onChange: (next) => setForm((prev) => ({ ...prev, verdict: String(fwbReadValue(next) ?? '') })),
+            options: [{ value: '', label: t('board.verdictNone') }, { value: 'pass', label: t('board.verdictPass') }, { value: 'fail', label: t('board.verdictFail') }],
+            style: { width: '100%' },
+          }))),
+      h(Field, { label: t('board.summary') },
+        h(TextArea, { value: form.summary, rows: 3, onChange: (next) => setForm((prev) => ({ ...prev, summary: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+      h(Field, { label: t('board.commands'), hint: t('board.commandsHint') },
+        h(TextArea, { value: form.commands, rows: 3, mono: true, onChange: (next) => setForm((prev) => ({ ...prev, commands: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+      h(Field, { label: t('board.evidence'), hint: t('board.oneLineEach') },
+        h(TextArea, { value: form.evidence, rows: 3, onChange: (next) => setForm((prev) => ({ ...prev, evidence: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+      h(Field, { label: t('board.files'), hint: t('board.oneLineEach') },
+        h(TextArea, { value: form.files, rows: 2, mono: true, onChange: (next) => setForm((prev) => ({ ...prev, files: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } })),
+      h(Field, { label: t('board.note') },
+        h(Input, { value: form.note, onChange: (next) => setForm((prev) => ({ ...prev, note: String(fwbReadValue(next) ?? '') })), style: { width: '100%' } }))))
+}
+
+/* ------------------------------------------------------------ decompose -- */
+
+function FwbBoardDecomposeModal({ act, projects, activeProjectId, onClose, onCreated, push }) {
+  const [prompt, setPrompt] = React.useState('')
+  const [maxTasks, setMaxTasks] = React.useState('6')
+  const [projectId, setProjectId] = React.useState(String(activeProjectId ?? ''))
+  const [busy, setBusy] = React.useState(false)
+  const [created, setCreated] = React.useState(null)
+  const [failure, setFailure] = React.useState(null)
+
+  const submit = async () => {
+    const text = prompt.trim()
+    if (text === '') {
+      push(t('board.decomposeNeedPrompt'), 'warn')
+      return
+    }
+    setBusy(true)
+    setFailure(null)
+    const payload = { prompt: text }
+    if (projectId !== '') payload.projectId = projectId
+    const max = Number(maxTasks)
+    if (Number.isFinite(max) && max > 0) payload.maxTasks = Math.round(max)
+    try {
+      const response = await fwbInvoke(act, 'decompose', [payload], () => api('/board/decompose', { method: 'POST', body: payload }))
+      const tasks = Array.isArray(response?.tasks) ? response.tasks : []
+      setCreated(tasks)
+      if (tasks.length === 0) {
+        setFailure(t('board.decomposeEmpty'))
+        push(t('board.decomposeEmpty'), 'warn')
+      } else {
+        push(t('board.decomposeCreated', { n: tasks.length }), 'ok')
+        if (typeof onCreated === 'function') onCreated()
+      }
+    } catch (error) {
+      setFailure(String(error?.message ?? error))
+      push(`${t('board.decomposeFailed')}: ${String(error?.message ?? error)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return h(Modal, {
+    title: t('board.decomposeTitle'),
+    onClose,
+    width: 680,
+    footer: h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+      h(Btn, { onClick: onClose, disabled: busy }, t('board.close')),
+      created !== null && created.length > 0 ? h(Btn, { onClick: submit, disabled: busy }, t('board.decomposeAgain')) : null,
+      h(Btn, { onClick: submit, kind: 'primary', disabled: busy }, busy === true ? t('board.decomposeRunning') : t('board.decomposeRun'))),
+  },
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 } },
+      h('div', { style: { color: T.textDim } }, t('board.decomposeHint')),
+      h(Field, { label: t('board.decomposePrompt') },
+        h(TextArea, {
+          value: prompt,
+          rows: 5,
+          placeholder: t('board.decomposePlaceholder'),
+          onChange: (next) => setPrompt(String(fwbReadValue(next) ?? '')),
+          style: { width: '100%' },
+        })),
+      h('div', { style: { display: 'flex', gap: 10 } },
+        h(Field, { label: t('board.decomposeMax'), style: { flex: 1 } },
+          h(Input, { value: maxTasks, type: 'number', onChange: (next) => setMaxTasks(String(fwbReadValue(next) ?? '')), style: { width: '100%' } })),
+        h(Field, { label: t('board.filterProject'), style: { flex: 2 } },
+          h(Select, {
+            value: projectId,
+            onChange: (next) => setProjectId(String(fwbReadValue(next) ?? '')),
+            options: [{ value: '', label: t('board.allProjects') }, ...(Array.isArray(projects) ? projects : []).map((project) => ({ value: String(project?.id ?? ''), label: String(project?.name ?? project?.id ?? '') }))],
+            style: { width: '100%' },
+          }))),
+      failure !== null ? h('div', { style: { color: T.error, fontSize: 12 } }, failure) : null,
+      created !== null && created.length > 0
+        ? h(Card, { title: `${t('board.decomposeResult')} · ${created.length}`, style: { padding: 8 } },
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+            created.map((task, index) => h('div', { key: String(task?.id ?? index), style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h(Pill, { tone: 'ok', style: { fontSize: 10, color: T.ok } }, t('board.created')),
+              h('span', { style: { flex: 1, minWidth: 0, fontWeight: 600 } }, String(task?.title ?? '')),
+              h('span', { style: { color: T.textFaint, fontSize: 10 } }, fwbBoardLaneLabel(task?.lane ?? 'backlog'))))))
+        : null))
+}
+
+/* ----------------------------------------------------------------- page -- */
+
+function BoardPage({ state, actions }) {
+  const act = fwbActions(state, actions)
+  const { notice, push, clear } = useFwbNotify(state, actions)
+  const live = useFwbBoard(2500)
+  const tasks = live.tasks
+  const laneList = live.laneList
+  const settings = state?.settings ?? {}
+
+  const [filters, setFilters] = React.useState({ projectId: '', tag: '', priority: '', text: '' })
+  const [overrides, setOverrides] = React.useState(null)   // optimistic move
+  const [dragId, setDragId] = React.useState(null)
+  const dragIdRef = React.useRef(null)
+  const [dropLane, setDropLane] = React.useState(null)
+  const [menuFor, setMenuFor] = React.useState(null)
+  const [editing, setEditing] = React.useState(null)
+  const [reporting, setReporting] = React.useState(null)
+  const [decomposing, setDecomposing] = React.useState(false)
+  const [forceAsk, setForceAsk] = React.useState(null)
+  const [busyIds, setBusyIds] = React.useState({})
+  const [creating, setCreating] = React.useState(false)
+
+  const setDrag = (id) => {
+    dragIdRef.current = id
+    setDragId(id)
+  }
+
+  const withBusy = async (id, run) => {
+    setBusyIds((prev) => ({ ...prev, [id]: true }))
+    try {
+      return await run()
+    } finally {
+      setBusyIds((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    }
+  }
+
+  // ---- mutation plumbing ------------------------------------------------
+  const refresh = live.refresh
+
+  const performMove = async (task, lane, index, force) => {
+    const previousLane = task?.lane ?? 'backlog'
+    const previousList = tasks.filter((item) => item?.lane === previousLane).sort(fwbBoardSort)
+    const previousIndex = previousList.findIndex((item) => item?.id === task?.id)
+    setOverrides({ id: task.id, lane, index })
+    try {
+      if (force === true) {
+        // Only the force path may bypass the acceptance gate → raw route call.
+        await api('/board/task', { method: 'POST', body: { action: 'move', id: task.id, lane, index, force: true } })
+      } else {
+        await fwbInvoke(act, 'moveTask', [{ id: task.id, lane, index }],
+          () => api('/board/task', { method: 'POST', body: { action: 'move', id: task.id, lane, index } }))
+      }
+      setOverrides(null)
+      await refresh()
+    } catch (error) {
+      // Roll back to the server truth and tell the user why.
+      setOverrides(null)
+      push(`${t('board.moveFailed')}: ${String(error?.message ?? error)}`, 'error')
+      void previousIndex
+    }
+  }
+
+  const requestMove = (task, lane, index) => {
+    if (task === null || task === undefined) return
+    if (lane === 'done' && task?.result?.verdict !== 'pass') {
+      setForceAsk({ task, lane, index })
+      return
+    }
+    performMove(task, lane, index, false)
+  }
+
+  const dropAt = (lane, index) => {
+    const id = dragIdRef.current
+    setDrag(null)
+    setDropLane(null)
+    if (id === null || id === undefined) return
+    const task = tasks.find((item) => item?.id === id)
+    if (task === undefined) return
+    requestMove(task, lane, index)
+  }
+
+  const moveLane = (task) => async (laneId) => {
+    setMenuFor(null)
+    if (laneId === task?.lane) return
+    if (laneId === 'done' && task?.result?.verdict !== 'pass') {
+      setForceAsk({ task, lane: laneId, index: null })
+      return
+    }
+    await performMove(task, laneId, null, false)
+  }
+
+  /** Ctrl/⌘ + ←/→ — the keyboard alternative to dragging. */
+  const keyMove = (task) => (direction) => {
+    const order = laneList.map((lane) => lane.id)
+    const current = order.indexOf(task?.lane)
+    const nextIndex = fwbClamp(current + direction, 0, order.length - 1)
+    if (current < 0 || nextIndex === current) return
+    requestMove(task, order[nextIndex], null)
+  }
+
+  const createCard = async (input) => {
+    setCreating(true)
+    try {
+      await fwbInvoke(act, 'createTask', [input],
+        () => api('/board/task', { method: 'POST', body: { action: 'create', ...input } }))
+      push(t('board.created'), 'ok')
+      await refresh()
+      return true
+    } catch (error) {
+      push(`${t('board.createFailed')}: ${String(error?.message ?? error)}`, 'error')
+      return false
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const dispatchCard = (task) => async () => {
+    await withBusy(task.id, async () => {
+      const payload = { id: task.id }
+      if (String(settings.defaultProvider ?? '') !== '') payload.provider = settings.defaultProvider
+      if (String(settings.defaultModel ?? '') !== '') payload.model = settings.defaultModel
+      try {
+        const response = await fwbInvoke(act, 'dispatchTask', [payload], () => api('/board/dispatch', { method: 'POST', body: payload }))
+        const sessionId = response?.sessionId ?? response?.task?.agent?.sessionId ?? '—'
+        push(t('board.dispatchOk', { id: String(sessionId) }), 'ok')
+        await refresh()
+      } catch (error) {
+        push(`${t('board.dispatchFailed')}: ${String(error?.message ?? error)}`, 'error')
+      }
+    })
+  }
+
+  const cancelCard = (task) => async () => {
+    await withBusy(task.id, async () => {
+      try {
+        await fwbInvoke(act, 'cancelTask', [{ id: task.id }],
+          () => api('/board/cancel', { method: 'POST', body: { id: task.id } }))
+        push(t('board.cancelOk'), 'ok')
+        await refresh()
+      } catch (error) {
+        push(`${t('board.cancelFailed')}: ${String(error?.message ?? error)}`, 'error')
+      }
+    })
+  }
+
+  const openSession = (task) => async () => {
+    const sessionId = task?.agent?.sessionId
+    if (sessionId === null || sessionId === undefined || sessionId === '') return
+    const fn = act.openSession
+    if (typeof fn === 'function') {
+      try {
+        await fn(String(sessionId), task.id)
+        return
+      } catch (error) {
+        push(String(error?.message ?? error), 'error')
+        return
+      }
+    }
+    const ok = await fwbCopy(String(sessionId))
+    push(ok ? t('board.sessionCopied') : t('board.copyFailed'), ok ? 'info' : 'error')
+  }
+
+  const archiveDone = async () => {
+    try {
+      await fwbInvoke(act, 'archiveDone', [], () => api('/board/task', { method: 'POST', body: { action: 'archive' } }))
+      push(t('board.archived'), 'ok')
+      await refresh()
+    } catch (error) {
+      push(`${t('board.archiveFailed')}: ${String(error?.message ?? error)}`, 'error')
+    }
+  }
+
+  // ---- derived data -----------------------------------------------------
+  const filtered = React.useMemo(() => tasks.filter((task) => fwbBoardMatches(task, filters)), [tasks, filters])
+  const buckets = React.useMemo(() => fwbBoardBuckets(laneList, filtered, overrides), [laneList, filtered, overrides])
+  const reviewTasks = React.useMemo(
+    () => tasks.filter((task) => task?.lane === 'review' || task?.lane === 'verify'),
+    [tasks],
+  )
+
+  const projectOptions = React.useMemo(() => {
+    const seen = new Map()
+    for (const project of Array.isArray(state?.projects) ? state.projects : []) seen.set(String(project?.id ?? ''), String(project?.name ?? project?.id ?? ''))
+    for (const task of tasks) {
+      const id = String(task?.projectId ?? '')
+      if (id !== '' && seen.has(id) === false) seen.set(id, id)
+    }
+    return [...seen.entries()].map(([value, label]) => ({ value, label }))
+  }, [state?.projects, tasks])
+
+  const tagOptions = React.useMemo(() => {
+    const tags = new Set()
+    for (const task of tasks) for (const tag of Array.isArray(task?.tags) ? task.tags : []) tags.add(String(tag))
+    return [...tags].sort()
+  }, [tasks])
+
+  const header = h('div', {
+    style: {
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '8px 10px',
+      borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+    },
+  },
+    h('div', { style: { fontWeight: 600, marginRight: 4 } }, t('board.title')),
+    h(Select, {
+      value: filters.projectId,
+      onChange: (next) => setFilters((prev) => ({ ...prev, projectId: String(fwbReadValue(next) ?? '') })),
+      options: [{ value: '', label: t('board.allProjects') }, ...projectOptions],
+      style: { minWidth: 132 },
+    }),
+    h(Select, {
+      value: filters.priority,
+      onChange: (next) => setFilters((prev) => ({ ...prev, priority: String(fwbReadValue(next) ?? '') })),
+      options: [{ value: '', label: t('board.allPriorities') }, ...FWB_BOARD_PRIORITIES.map((id) => ({ value: id, label: fwbBoardPriorityLabel(id) }))],
+      style: { minWidth: 120 },
+    }),
+    tagOptions.length > 0
+      ? h(Select, {
+        value: filters.tag,
+        onChange: (next) => setFilters((prev) => ({ ...prev, tag: String(fwbReadValue(next) ?? '') })),
+        options: [{ value: '', label: t('board.allTags') }, ...tagOptions.map((tag) => ({ value: tag, label: tag }))],
+        style: { minWidth: 110 },
+      })
+      : null,
+    h('div', { style: { flex: 1, minWidth: 140 } },
+      h(Input, {
+        value: filters.text,
+        onChange: (next) => setFilters((prev) => ({ ...prev, text: String(fwbReadValue(next) ?? '') })),
+        placeholder: t('board.search'),
+        style: { width: '100%' },
+      })),
+    h(Btn, { onClick: () => setDecomposing(true), kind: 'primary' }, t('board.decompose')),
+    h(Btn, { onClick: () => setEditing({ task: null }) }, t('board.new')),
+    h(Btn, { onClick: () => refresh() }, t('common.refresh')),
+    h(Btn, { onClick: archiveDone, kind: 'danger' }, t('board.archiveDone')))
+
+  const strip = h('div', {
+    style: {
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '5px 10px',
+      borderBottom: `1px solid ${T.border}`, background: reviewTasks.length > 0 ? T.bgRaised : 'transparent',
+      fontSize: 11, flexShrink: 0,
+    },
+  },
+    h(Pill, { tone: reviewTasks.length > 0 ? 'warn' : 'neutral', style: { color: reviewTasks.length > 0 ? T.warn : T.textDim } },
+      `${t('board.myReview')} · ${reviewTasks.length}`),
+    reviewTasks.length === 0
+      ? h('span', { style: { color: T.textFaint } }, t('board.myReviewEmpty'))
+      : reviewTasks.slice(0, 4).map((task) => h(Chip, {
+        key: task.id,
+        onClick: () => setEditing({ task }),
+        title: t('board.openHint'),
+      }, String(task?.title ?? ''))),
+    reviewTasks.length > 4 ? h('span', { style: { color: T.textFaint } }, `+${reviewTasks.length - 4}`) : null,
+    h('div', { style: { flex: 1 } }),
+    h('span', { style: { color: T.textFaint } }, t('board.keyHint')))
+
+  const board = h('div', {
+    style: { flex: 1, minHeight: 0, display: 'flex', gap: 8, padding: 8, overflowX: 'auto', alignItems: 'stretch' },
+  },
+    buckets.map((bucket) => {
+      const items = bucket.items
+      const laneId = bucket.id
+      return h('div', {
+        key: laneId,
+        onDragOver: (event) => {
+          event.preventDefault()
+          if (dropLane !== laneId) setDropLane(laneId)
+        },
+        onDragLeave: () => setDropLane((current) => (current === laneId ? null : current)),
+        onDrop: (event) => {
+          event.preventDefault()
+          dropAt(laneId, items.length)
+        },
+        style: {
+          width: 246, flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0,
+          border: `1px solid ${dropLane === laneId ? T.brand : T.border}`, borderRadius: T.radius,
+          background: dropLane === laneId ? T.bgInput : 'transparent', transition: 'background 120ms linear',
+        },
+      },
+        h('div', {
+          style: {
+            display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px',
+            borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+          },
+        },
+          h(Pill, { tone: fwbBoardLaneTone(laneId), style: { fontSize: 11 } }, fwbBoardLaneLabel(laneId)),
+          h('span', {
+            title: t('board.cardsCount', { n: items.length }),
+            style: {
+              fontSize: 10, minWidth: 18, textAlign: 'center', padding: '1px 5px', borderRadius: 99,
+              border: `1px solid ${T.border}`, color: T.textDim, fontVariantNumeric: 'tabular-nums',
+            },
+          }, String(items.length)),
+          h('div', { style: { flex: 1 } }),
+          laneId === 'backlog' ? h(IconBtn, { onClick: () => setEditing({ task: null }), title: t('board.new'), size: 'sm' }, '+') : null),
+
+        laneId === 'backlog'
+          ? h(FwbBoardQuickAdd, { onCreate: (title) => createCard({ title, lane: 'backlog', priority: 'normal' }), busy: creating })
+          : null,
+
+        h('div', {
+          style: { flex: 1, minHeight: 60, overflowY: 'auto', overflowX: 'hidden', paddingBottom: 4, display: 'flex', flexDirection: 'column' },
+        },
+          items.length === 0
+            ? h('div', { style: { color: T.textFaint, fontSize: 11, padding: '14px 10px', textAlign: 'center' } }, dropLane === laneId ? t('board.dropHint') : t('board.empty'))
+            : items.map((task, index) => h(FwbBoardCard, {
+              key: String(task?.id ?? index),
+              task,
+              index,
+              menuOpen: menuFor === task?.id,
+              menuLanes: laneList,
+              dragging: dragId === task?.id,
+              dropTarget: false,
+              busy: busyIds[task?.id] === true,
+              onOpen: () => setEditing({ task }),
+              onDragStart: () => setDrag(task?.id ?? null),
+              onDragEnd: () => {
+                setDrag(null)
+                setDropLane(null)
+              },
+              onDragOverCard: () => setDropLane(laneId),
+              onDropAt: (at) => dropAt(laneId, at),
+              onMenu: () => setMenuFor((current) => (current === task?.id ? null : task?.id)),
+              onMoveLane: moveLane(task),
+              onKeyMove: keyMove(task),
+              onDispatch: dispatchCard(task),
+              onReport: () => setReporting({ task }),
+              onCancelAgent: cancelCard(task),
+              onOpenSession: openSession(task),
+            }))))
+    }))
+
+  return h(FwbPage, { notice, onDismiss: clear },
+    header,
+    strip,
+    live.error !== null
+      ? h('div', { style: { padding: '6px 10px', color: T.error, fontSize: 12, borderBottom: `1px solid ${T.border}` } },
+        `${t('board.loadFailed')}: ${String(live.error?.message ?? live.error)}`)
+      : null,
+    board,
+
+    editing !== null
+      ? h(FwbBoardCardModal, {
+        task: editing.task ?? { id: null, title: '', lane: 'backlog', priority: 'normal', acceptance: [], verify: [], files: [], tags: [], history: [], result: null, agent: null },
+        act,
+        laneList,
+        provider: String(settings.defaultProvider ?? ''),
+        model: String(settings.defaultModel ?? ''),
+        onClose: () => setEditing(null),
+        onChanged: () => refresh(),
+        push,
+        onOpenSession: openSession(editing.task ?? {}),
+      })
+      : null,
+
+    reporting !== null
+      ? h(FwbBoardReportModal, {
+        task: reporting.task,
+        act,
+        onClose: () => setReporting(null),
+        onChanged: () => refresh(),
+        push,
+      })
+      : null,
+
+    decomposing === true
+      ? h(FwbBoardDecomposeModal, {
+        act,
+        projects: state?.projects,
+        activeProjectId: state?.activeProjectId,
+        onClose: () => setDecomposing(false),
+        onCreated: () => refresh(),
+        push,
+      })
+      : null,
+
+    forceAsk !== null
+      ? h(Modal, {
+        title: t('board.forceTitle'),
+        onClose: () => setForceAsk(null),
+        width: 480,
+        footer: h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+          h(Btn, { onClick: () => setForceAsk(null) }, t('board.cancelMove')),
+          h(Btn, {
+            onClick: () => {
+              const ask = forceAsk
+              setForceAsk(null)
+              performMove(ask.task, ask.lane, ask.index, true)
+            },
+            kind: 'primary',
+          }, t('board.forceConfirm'))),
+      },
+        h('div', { style: { fontSize: 12, lineHeight: 1.7, color: T.textDim } },
+          h('div', { style: { marginBottom: 6 } }, t('board.forceBody')),
+          h('div', { style: { fontWeight: 600, color: T.text } }, String(forceAsk.task?.title ?? ''))))
+      : null)
+}
+
+/* ------------------------------------------------------------- locale -- */
+
+fwbExtendLocale({
+  'board.title': '看板',
+  'board.new': '新建卡片',
+  'board.decompose': 'AI 拆解',
+  'board.decomposeTitle': 'AI 拆解需求',
+  'board.decomposeHint': '写清楚要做什么，AI 会把它拆成若干张卡片放进「待办」。',
+  'board.decomposePrompt': '需求描述',
+  'board.decomposePlaceholder': '例如：给设置页加上 MCP 令牌轮换、连接提示和一键复制配置',
+  'board.decomposeMax': '最多卡片数',
+  'board.decomposeRun': '开始拆解',
+  'board.decomposeAgain': '重新拆解',
+  'board.decomposeRunning': '拆解中…',
+  'board.decomposeEmpty': 'AI 没有返回可用的卡片',
+  'board.decomposeCreated': '已创建 {n} 张卡片',
+  'board.decomposeResult': '新建的卡片',
+  'board.decomposeFailed': '拆解失败',
+  'board.decomposeNeedPrompt': '请先写需求描述',
+  'board.refresh': '刷新',
+  'board.archiveDone': '归档已完成',
+  'board.archived': '已归档完成的卡片',
+  'board.archiveFailed': '归档失败',
+  'board.allProjects': '全部项目',
+  'board.allPriorities': '全部优先级',
+  'board.allTags': '全部标签',
+  'board.search': '搜索标题 / 详情 / 标签',
+  'board.filterProject': '项目',
+  'board.filterPriority': '优先级',
+  'board.filterTag': '标签',
+  'board.lane.backlog': '待办',
+  'board.lane.ready': '就绪',
+  'board.lane.running': '执行中',
+  'board.lane.review': '待验收',
+  'board.lane.verify': '验证中',
+  'board.lane.done': '完成',
+  'board.priority.low': '低',
+  'board.priority.normal': '普通',
+  'board.priority.high': '高',
+  'board.priority.urgent': '紧急',
+  'board.empty': '这一列还是空的',
+  'board.dropHint': '松手放到这里',
+  'board.quickAdd': '快速添加一张卡片…',
+  'board.quickAddHint': '回车创建到「待办」',
+  'board.add': '添加',
+  'board.acceptanceCount': '验收 {n} 项',
+  'board.verifyCount': '验证 {n} 条',
+  'board.filesCount': '文件 {n}',
+  'board.myReview': '我的待验收',
+  'board.myReviewEmpty': '没有等待你验收的卡片',
+  'board.agentWorking': 'AI 执行中',
+  'board.agentQueued': '排队中',
+  'board.agentBlocked': '受阻',
+  'board.agentDone': '已完成',
+  'board.agentFailed': '失败',
+  'board.agent': 'AI 执行',
+  'board.agentIdle': '未派发',
+  'board.awaitingAcceptance': '待验收',
+  'board.blocked': '受阻',
+  'board.verdictPass': '通过',
+  'board.verdictFail': '未通过',
+  'board.verdictNone': '未判定',
+  'board.verdict': '结论',
+  'board.dispatch': '派给 AI',
+  'board.dispatching': '派发中…',
+  'board.dispatchHint': '创建一个 DSH 会话执行这张卡片',
+  'board.dispatchOk': '已派发给 AI（会话 {id}）',
+  'board.dispatchFailed': '派发失败',
+  'board.report': '报告结果',
+  'board.reportHint': '记录执行摘要、命令与结论',
+  'board.reportTitle': '报告执行结果',
+  'board.reportSave': '保存结果',
+  'board.reportOk': '结果已记录',
+  'board.reportFailed': '报告失败',
+  'board.reportStatus.done': '完成',
+  'board.reportStatus.failed': '失败',
+  'board.reportStatus.blocked': '受阻',
+  'board.reportStatus.working': '进行中',
+  'board.cancel': '取消执行',
+  'board.cancelOk': '已取消 AI 执行',
+  'board.cancelFailed': '取消失败',
+  'board.cancelMove': '先不退',
+  'board.openSession': '打开会话',
+  'board.sessionCopied': '会话 ID 已复制，请在 DSH 会话列表里打开',
+  'board.copyFailed': '复制失败',
+  'board.edit': '编辑',
+  'board.openHint': '打开卡片详情',
+  'board.moveTo': '移动到',
+  'board.moveToLane': '移到 {lane}',
+  'board.delete': '删除',
+  'board.deleted': '卡片已删除',
+  'board.deleteFailed': '删除失败',
+  'board.title': '标题',
+  'board.detail': '详情',
+  'board.summary': '执行摘要',
+  'board.acceptance': '验收标准（一行一条）',
+  'board.acceptanceTitle': '验收清单',
+  'board.verify': '验证命令（一行一条）',
+  'board.verifyTitle': '验证命令',
+  'board.files': '涉及文件（一行一条）',
+  'board.filesTitle': '涉及文件',
+  'board.tags': '标签（逗号分隔）',
+  'board.tagsHint': '逗号分隔，例如 ui, api',
+  'board.priority': '优先级',
+  'board.oneLineEach': '一行一条',
+  'board.save': '保存',
+  'board.create': '创建卡片',
+  'board.cardsCount': '{n} 张卡片',
+  'board.titleRequired': '标题不能为空',
+  'board.saved': '已保存',
+  'board.created': '已创建',
+  'board.createFailed': '创建失败',
+  'board.saveFailed': '保存失败',
+  'board.moveFailed': '移动失败',
+  'board.loadFailed': '看板加载失败',
+  'board.noDetail': '还没有填写详情',
+  'board.noAcceptance': '还没有验收标准',
+  'board.noVerify': '没有验证命令',
+  'board.noVerifyShort': '未写验证命令',
+  'board.commands': '运行的命令',
+  'board.commandsHint': '每行：命令 | passed/failed | 退出码',
+  'board.evidence': '证据',
+  'board.result': '执行结果',
+  'board.resultEmpty': '还没有执行结果',
+  'board.lastReport': '最近一次回报',
+  'board.history': '历史',
+  'board.historyEmpty': '暂无历史',
+  'board.status': '状态',
+  'board.note': '备注',
+  'board.openFile': '打开',
+  'board.close': '关闭',
+  'board.confirm': '确定',
+  'board.forceTitle': '强制移入「完成」？',
+  'board.forceBody': '这张卡片还没有通过验收（result.verdict 不是 pass）。强制完成会跳过验收门槛，并记录到历史里。',
+  'board.forceConfirm': '强制完成',
+  'board.keyHint': 'Ctrl/⌘ + ←/→ 切换列，拖拽可跨列移动',
+  'board.laneMenu': '移动到其它列',
+}, {
+  'board.title': 'Board',
+  'board.new': 'New card',
+  'board.decompose': 'AI breakdown',
+  'board.decomposeTitle': 'Break a requirement down with AI',
+  'board.decomposeHint': 'Describe the work; the AI splits it into cards in your backlog.',
+  'board.decomposePrompt': 'Requirement',
+  'board.decomposePlaceholder': 'e.g. add MCP token rotation, a connect hint and copy-config to the settings page',
+  'board.decomposeMax': 'Max cards',
+  'board.decomposeRun': 'Break it down',
+  'board.decomposeAgain': 'Run again',
+  'board.decomposeRunning': 'Breaking down…',
+  'board.decomposeEmpty': 'The AI returned no usable cards',
+  'board.decomposeCreated': 'Created {n} cards',
+  'board.decomposeResult': 'New cards',
+  'board.decomposeFailed': 'Breakdown failed',
+  'board.decomposeNeedPrompt': 'Write the requirement first',
+  'board.refresh': 'Refresh',
+  'board.archiveDone': 'Archive done',
+  'board.archived': 'Archived the done cards',
+  'board.archiveFailed': 'Archive failed',
+  'board.allProjects': 'All projects',
+  'board.allPriorities': 'All priorities',
+  'board.allTags': 'All tags',
+  'board.search': 'Search title / detail / tags',
+  'board.filterProject': 'Project',
+  'board.filterPriority': 'Priority',
+  'board.filterTag': 'Tag',
+  'board.lane.backlog': 'Backlog',
+  'board.lane.ready': 'Ready',
+  'board.lane.running': 'Running',
+  'board.lane.review': 'Review',
+  'board.lane.verify': 'Verify',
+  'board.lane.done': 'Done',
+  'board.priority.low': 'Low',
+  'board.priority.normal': 'Normal',
+  'board.priority.high': 'High',
+  'board.priority.urgent': 'Urgent',
+  'board.empty': 'This lane is empty',
+  'board.dropHint': 'Drop here',
+  'board.quickAdd': 'Quick add a card…',
+  'board.quickAddHint': 'Enter creates it in the backlog',
+  'board.add': 'Add',
+  'board.acceptanceCount': '{n} acceptance',
+  'board.verifyCount': '{n} checks',
+  'board.filesCount': '{n} files',
+  'board.myReview': 'Awaiting my review',
+  'board.myReviewEmpty': 'Nothing is waiting for your review',
+  'board.agentWorking': 'AI working',
+  'board.agentQueued': 'Queued',
+  'board.agentBlocked': 'Blocked',
+  'board.agentDone': 'Done',
+  'board.agentFailed': 'Failed',
+  'board.agent': 'AI',
+  'board.agentIdle': 'not dispatched',
+  'board.awaitingAcceptance': 'Needs review',
+  'board.blocked': 'Blocked',
+  'board.verdictPass': 'Pass',
+  'board.verdictFail': 'Fail',
+  'board.verdictNone': 'Not judged',
+  'board.verdict': 'Verdict',
+  'board.dispatch': 'Dispatch to AI',
+  'board.dispatching': 'Dispatching…',
+  'board.dispatchHint': 'Start a DSH session that executes this card',
+  'board.dispatchOk': 'Dispatched to AI (session {id})',
+  'board.dispatchFailed': 'Dispatch failed',
+  'board.report': 'Report result',
+  'board.reportHint': 'Record the summary, commands and verdict',
+  'board.reportTitle': 'Report the execution result',
+  'board.reportSave': 'Save result',
+  'board.reportOk': 'Result recorded',
+  'board.reportFailed': 'Report failed',
+  'board.reportStatus.done': 'Done',
+  'board.reportStatus.failed': 'Failed',
+  'board.reportStatus.blocked': 'Blocked',
+  'board.reportStatus.working': 'In progress',
+  'board.cancel': 'Cancel run',
+  'board.cancelOk': 'Cancelled the AI run',
+  'board.cancelFailed': 'Cancel failed',
+  'board.cancelMove': 'Not now',
+  'board.openSession': 'Open session',
+  'board.sessionCopied': 'Session id copied — open it from the DSH session list',
+  'board.copyFailed': 'Copy failed',
+  'board.edit': 'Edit',
+  'board.openHint': 'Open the card',
+  'board.moveTo': 'Move to',
+  'board.moveToLane': 'Move to {lane}',
+  'board.delete': 'Delete',
+  'board.deleted': 'Card deleted',
+  'board.deleteFailed': 'Delete failed',
+  'board.title': 'Title',
+  'board.detail': 'Detail',
+  'board.summary': 'Summary',
+  'board.acceptance': 'Acceptance (one per line)',
+  'board.acceptanceTitle': 'Acceptance checklist',
+  'board.verify': 'Verify commands (one per line)',
+  'board.verifyTitle': 'Verify commands',
+  'board.files': 'Files (one per line)',
+  'board.filesTitle': 'Files',
+  'board.tags': 'Tags (comma separated)',
+  'board.tagsHint': 'comma separated, e.g. ui, api',
+  'board.priority': 'Priority',
+  'board.oneLineEach': 'one per line',
+  'board.save': 'Save',
+  'board.create': 'Create card',
+  'board.cardsCount': '{n} cards',
+  'board.titleRequired': 'The title cannot be empty',
+  'board.saved': 'Saved',
+  'board.created': 'Created',
+  'board.createFailed': 'Create failed',
+  'board.saveFailed': 'Save failed',
+  'board.moveFailed': 'Move failed',
+  'board.loadFailed': 'Could not load the board',
+  'board.noDetail': 'No detail yet',
+  'board.noAcceptance': 'No acceptance criteria yet',
+  'board.noVerify': 'No verify commands',
+  'board.noVerifyShort': 'no verify command',
+  'board.commands': 'Commands run',
+  'board.commandsHint': 'per line: command | passed/failed | exit code',
+  'board.evidence': 'Evidence',
+  'board.result': 'Result',
+  'board.resultEmpty': 'No result yet',
+  'board.lastReport': 'Last report',
+  'board.history': 'History',
+  'board.historyEmpty': 'No history yet',
+  'board.status': 'Status',
+  'board.note': 'Note',
+  'board.openFile': 'Open',
+  'board.close': 'Close',
+  'board.confirm': 'OK',
+  'board.forceTitle': 'Force this card into Done?',
+  'board.forceBody': 'This card has not passed acceptance (result.verdict is not pass). Forcing completion skips the gate and is recorded in the history.',
+  'board.forceConfirm': 'Force done',
+  'board.keyHint': 'Ctrl/⌘ + ←/→ switches lane, drag to move across lanes',
+  'board.laneMenu': 'Move to another lane',
+})
 
     /* ==== 60-quality.js ==== */
 /* ====================================================================== *
