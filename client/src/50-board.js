@@ -283,7 +283,7 @@ function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, 
           onMenu()
         },
         title: t('board.moveTo'),
-        size: 'sm',
+        size: 22,
         active: menuOpen === true,
         style: { flexShrink: 0 },
       }, '⋯')),
@@ -331,7 +331,7 @@ function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, 
         style: {
           position: 'absolute', right: 4, top: 22, zIndex: 20, minWidth: 130, padding: 4,
           border: `1px solid ${T.borderStrong}`, borderRadius: T.radiusSm, background: T.bgRaised,
-          boxShadow: `0 6px 18px ${T.overlay ?? 'rgba(0,0,0,0.3)'}`,
+          boxShadow: `0 6px 18px ${T.overlay}`,
         },
         onClick: (event) => event.stopPropagation(),
       },
@@ -360,7 +360,7 @@ function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, 
 /* ---------------------------------------------------------------- modal -- */
 
 /** Card detail + editor: acceptance checklist, verify commands, history, result. */
-function FwbBoardCardModal({ task, act, laneList, provider, model, onClose, onChanged, push, onOpenSession }) {
+function FwbBoardCardModal({ task, act, provider, model, onClose, onChanged, push, onOpenSession }) {
   const [editing, setEditing] = React.useState(() => task?.id === null || task?.id === undefined)
   const [draft, setDraft] = React.useState(() => ({
     title: String(task?.title ?? ''),
@@ -771,9 +771,6 @@ function BoardPage({ state, actions }) {
   const refresh = live.refresh
 
   const performMove = async (task, lane, index, force) => {
-    const previousLane = task?.lane ?? 'backlog'
-    const previousList = tasks.filter((item) => item?.lane === previousLane).sort(fwbBoardSort)
-    const previousIndex = previousList.findIndex((item) => item?.id === task?.id)
     setOverrides({ id: task.id, lane, index })
     try {
       if (force === true) {
@@ -789,7 +786,6 @@ function BoardPage({ state, actions }) {
       // Roll back to the server truth and tell the user why.
       setOverrides(null)
       push(`${t('board.moveFailed')}: ${String(error?.message ?? error)}`, 'error')
-      void previousIndex
     }
   }
 
@@ -1024,7 +1020,7 @@ function BoardPage({ state, actions }) {
             },
           }, String(items.length)),
           h('div', { style: { flex: 1 } }),
-          laneId === 'backlog' ? h(IconBtn, { onClick: () => setEditing({ task: null }), title: t('board.new'), size: 'sm' }, '+') : null),
+          laneId === 'backlog' ? h(IconBtn, { onClick: () => setEditing({ task: null }), title: t('board.new'), size: 22 }, '+') : null),
 
         laneId === 'backlog'
           ? h(FwbBoardQuickAdd, { onCreate: (title) => createCard({ title, lane: 'backlog', priority: 'normal' }), busy: creating })
@@ -1075,7 +1071,6 @@ function BoardPage({ state, actions }) {
       ? h(FwbBoardCardModal, {
         task: editing.task ?? { id: null, title: '', lane: 'backlog', priority: 'normal', acceptance: [], verify: [], files: [], tags: [], history: [], result: null, agent: null },
         act,
-        laneList,
         provider: String(settings.defaultProvider ?? ''),
         model: String(settings.defaultModel ?? ''),
         onClose: () => setEditing(null),

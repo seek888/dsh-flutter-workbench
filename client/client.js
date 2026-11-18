@@ -1819,7 +1819,7 @@ function Pill(props) {
       ...(props.style ?? {}),
     },
   },
-    props.dot === true ? h('span', { style: { width: 6, height: 6, borderRadius: 6, background: 'currentColor', flex: 'none' } }) : null,
+    props.dot === true ? h('span', { style: { width: 6, height: 6, borderRadius: T.radiusSm, background: 'currentColor', flex: 'none' } }) : null,
     props.children)
 }
 
@@ -2193,7 +2193,7 @@ function ToastHost(props) {
         fontSize: T.fsSm,
       },
     },
-      h('span', { style: { width: 6, height: 6, borderRadius: 6, background: colors.fg, marginTop: 6, flex: 'none' } }),
+      h('span', { style: { width: 6, height: 6, borderRadius: T.radiusSm, background: colors.fg, marginTop: 6, flex: 'none' } }),
       h('div', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word' } }, toast.message),
       props.onDismiss !== undefined
         ? h(IconBtn, { icon: 'x', size: 20, title: t('common.close'), onClick: () => props.onDismiss(toast.id) })
@@ -2238,7 +2238,7 @@ function Spinner(props) {
       display: 'inline-block',
       width: size,
       height: size,
-      borderRadius: size,
+      borderRadius: T.radiusSm,
       border: `2px solid ${T.border}`,
       borderTopColor: props.color ?? T.brand,
       animation: 'fwb-spin 0.8s linear infinite',
@@ -2472,7 +2472,7 @@ function ProgressBar(props) {
     style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, ...(props.style ?? {}) },
   },
     h('div', {
-      style: { height: props.height ?? 6, borderRadius: 4, background: T.l2, overflow: 'hidden' },
+      style: { height: props.height ?? 6, borderRadius: T.radiusXs, background: T.l2, overflow: 'hidden' },
     }, h('div', { style: { width: `${pct * 100}%`, height: '100%', background: colors.fg, transition: 'width 120ms linear' } })),
     props.label === undefined ? null : h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, props.label))
 }
@@ -2492,7 +2492,7 @@ function Badge(props) {
       minWidth: 16,
       height: 16,
       padding: '0 4px',
-      borderRadius: 8,
+      borderRadius: T.radiusSm,
       background: colors.bg,
       color: colors.fg,
       fontSize: 10,
@@ -2584,7 +2584,7 @@ function ConnDot({ ok, tone }) {
     style: {
       width: 7,
       height: 7,
-      borderRadius: 7,
+      borderRadius: T.radiusSm,
       flex: 'none',
       background: colors.fg,
       boxShadow: `0 0 0 2px ${colors.bg}`,
@@ -2638,7 +2638,7 @@ function deviceChipLabel(state) {
   const devices = state?.devices ?? []
   if (devices.length > 0) {
     const device = devices[0]
-    return { label: device.name ?? device.id ?? t('shell.device'), tone: 'neutral', title: `${t('runtime.deviceCount', { n: devices.length })}` }
+    return { label: device.name ?? device.id ?? t('shell.device'), tone: 'neutral', title: t('runtime.deviceCount', { n: devices.length }) }
   }
   return { label: t('shell.deviceMissing'), tone: 'neutral', title: t('shell.deviceMissing') }
 }
@@ -2659,18 +2659,20 @@ function buildPaletteItems(state, actions, selectPage) {
   const activeRun = (state?.runs ?? []).find((run) => run.runId === state?.activeRunId) ?? null
   const phase = activeRun?.phase ?? 'idle'
   const live = ['running', 'reloading', 'restarting'].includes(phase)
+  const hasProject = state?.activeProjectId !== undefined && state?.activeProjectId !== null
+  const hasVm = activeRun?.vmServiceUri !== undefined && activeRun?.vmServiceUri !== null
   const commands = [
-    { id: 'run.start', label: t('runtime.start'), icon: 'play', disable: state?.activeProjectId === undefined || state?.activeProjectId === null, run: () => actions.startRun === undefined ? undefined : actions.startRun() },
+    { id: 'run.start', label: t('runtime.start'), icon: 'play', disable: !hasProject, run: () => (actions.startRun === undefined ? undefined : actions.startRun()) },
     { id: 'run.check', label: t('run.active'), icon: 'terminal', run: () => selectPage('runtime') },
     { id: 'run.reload', label: t('runtime.reload'), icon: 'reload', disable: !live, run: () => (actions.hotReload === undefined ? undefined : actions.hotReload()) },
     { id: 'run.restart', label: t('runtime.restart'), icon: 'restart', disable: !live, run: () => (actions.hotRestart === undefined ? undefined : actions.hotRestart()) },
     { id: 'run.stop', label: t('runtime.stop'), icon: 'stop', disable: activeRun === null, run: () => (actions.stopRun === undefined ? undefined : actions.stopRun()) },
     { id: 'shell.refresh', label: t('common.refresh'), icon: 'refresh', run: () => (actions.refreshAll === undefined ? undefined : actions.refreshAll()) },
     { id: 'shell.addProject', label: t('shell.addProject'), icon: 'plus', run: () => selectPage('runtime') },
-    { id: 'shell.devtools', label: t('runtime.openDevtools'), icon: 'external', disable: activeRun?.vmServiceUri === null || activeRun?.vmServiceUri === undefined, run: () => openDevtools(activeRun) },
-    { id: 'shell.copyVm', label: t('shell.copyVmUri'), icon: 'copy', disable: activeRun?.vmServiceUri === null || activeRun?.vmServiceUri === undefined, run: () => copyVmUri(activeRun, actions) },
+    { id: 'shell.devtools', label: t('runtime.openDevtools'), icon: 'external', disable: !hasVm, run: () => openDevtools(activeRun) },
+    { id: 'shell.copyVm', label: t('shell.copyVmUri'), icon: 'copy', disable: !hasVm, run: () => copyVmUri(activeRun, actions) },
   ]
-  return [...items, ...commands.filter((item) => !item.disable).concat(commands.filter((item) => item.disable))]
+  return [...items, ...commands.filter((item) => item.disable !== true), ...commands.filter((item) => item.disable === true)]
 }
 
 /** Open DevTools for a run (or report why it is not possible). */
@@ -2697,6 +2699,37 @@ async function copyVmUri(activeRun, actions) {
   const ok = await copyText(uri)
   if (actions?.toast !== undefined) actions.toast(ok ? t('common.copied') : t('common.copyFailed'), ok ? 'ok' : 'error')
   return ok
+}
+
+/** One palette row. */
+function paletteRow(item, active, execute) {
+  const [hover, bind] = useHover()
+  return h('button', {
+    key: item.id,
+    type: 'button',
+    'data-active': active,
+    onMouseEnter: bind.onMouseEnter,
+    onMouseLeave: bind.onMouseLeave,
+    onClick: () => execute(item),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      width: '100%',
+      height: 28,
+      padding: '0 8px',
+      borderRadius: T.radiusSm,
+      border: '1px solid transparent',
+      background: active === true ? T.selected : hover ? T.hover : 'transparent',
+      color: item.disable === true ? T.textFaint : T.text,
+      fontSize: T.fsSm,
+      cursor: 'pointer',
+      textAlign: 'left',
+    },
+  },
+    h(Icon, { name: item.icon ?? 'dot', size: 13 }),
+    h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.label),
+    h('span', { style: { color: T.textFaint, fontSize: T.fsXs, fontFamily: T.mono } }, item.hint ?? ''))
 }
 
 /** Command palette: page jumps plus run/home actions. */
@@ -2760,37 +2793,6 @@ function CommandPalette({ state, actions, onClose, selectPage }) {
         pages.map((item) => paletteRow(item, filtered.indexOf(item) === index, execute)),
         commands.length > 0 ? h('div', { style: { fontSize: T.fsXs, color: T.textFaint, padding: '6px 6px 4px' } }, t('shell.paletteActions')) : null,
         commands.map((item) => paletteRow(item, filtered.indexOf(item) === index, execute)))))
-}
-
-/** One palette row. */
-function paletteRow(item, active, execute) {
-  const [hover, bind] = useHover()
-  return h('button', {
-    key: item.id,
-    type: 'button',
-    'data-active': active,
-    onMouseEnter: bind.onMouseEnter,
-    onMouseLeave: bind.onMouseLeave,
-    onClick: () => execute(item),
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      width: '100%',
-      height: 28,
-      padding: '0 8px',
-      borderRadius: T.radiusSm,
-      border: '1px solid transparent',
-      background: active === true ? T.selected : hover ? T.hover : 'transparent',
-      color: item.disable === true ? T.textFaint : T.text,
-      fontSize: T.fsSm,
-      cursor: 'pointer',
-      textAlign: 'left',
-    },
-  },
-    h(Icon, { name: item.icon ?? 'dot', size: 13 }),
-    h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.label),
-    h('span', { style: { color: T.textFaint, fontSize: T.fsXs, fontFamily: T.mono } }, item.hint ?? ''))
 }
 
 /**
@@ -3674,6 +3676,7 @@ function useApiState() {
     paused,
     draft,
     toasts: toastQueue.toasts,
+    toast: toastQueue.toast,
     conn: {
       ok: snapshotPoll.error === null && snapshot !== null,
       error: snapshotPoll.error,
@@ -4288,7 +4291,7 @@ function highlightText(text, regex) {
       style: {
         background: `color-mix(in srgb, ${T.warn} 40%, transparent)`,
         color: 'inherit',
-        borderRadius: 2,
+        borderRadius: T.radiusXs,
         padding: '0 1px',
       },
     }, match[0]))
@@ -4356,7 +4359,7 @@ function LogRow({ entry, top, height, expanded, onToggle, onOpenFile, regex }) {
       h('span', { style: { width: 84, flex: 'none', color: T.textFaint, fontFamily: T.mono, fontSize: T.fsXs } }, time),
       h('span', {
         style: {
-          width: 42, flex: 'none', textAlign: 'center', borderRadius: 3, height: 15, lineHeight: '15px',
+          width: 42, flex: 'none', textAlign: 'center', borderRadius: T.radiusXs, height: 15, lineHeight: '15px',
           marginTop: 3, background: colors.bg, color: colors.fg, fontSize: 10, fontWeight: 700,
           textTransform: 'uppercase', letterSpacing: 0.3,
         },
@@ -4807,7 +4810,7 @@ function LogsPage({ state: sharedState, actions: sharedActions }) {
           style: {
             position: 'absolute', left: '50%', transform: 'translateX(-50%)', bottom: 10,
             display: 'inline-flex', alignItems: 'center', gap: 5, height: 24, padding: '0 10px',
-            borderRadius: 12, border: `1px solid ${T.borderStrong}`, background: T.bgRaised,
+            borderRadius: T.radiusMd, border: `1px solid ${T.borderStrong}`, background: T.bgRaised,
             color: T.text, fontSize: T.fsXs, cursor: 'pointer', boxShadow: T.shadow,
           },
         },
@@ -5061,22 +5064,12 @@ function FwbCopyBtn({ value, label, notify, kind, disabled }) {
 function FwbPage({ children, notice, onDismiss, gap }) {
   return h('div', {
     style: {
-      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1,
       color: T.text, fontSize: T.fs, fontFamily: T.font, gap: gap ?? 0,
     },
   },
     h(FwbNotice, { notice, onDismiss }),
     children)
-}
-
-/** Label/value grid used by the network drawer and the settings/quality panes. */
-function FwbKeyValues({ entries, mono }) {
-  const rows = entries === null || entries === undefined ? [] : entries
-  if (rows.length === 0) return h('div', { style: { color: T.textFaint, fontSize: 12, padding: '4px 0' } }, t('net.noHeaders'))
-  return h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(110px, 32%) 1fr', gap: '2px 10px', fontSize: 12 } },
-    rows.map((row, index) => h(React.Fragment, { key: `${row[0]}-${index}` },
-      h('div', { style: { color: T.textFaint, overflowWrap: 'anywhere' } }, String(row[0])),
-      h('div', { style: { color: T.text, overflowWrap: 'anywhere', fontFamily: mono === false ? T.font : T.mono } }, String(row[1])))))
 }
 
 /** Pretty-print a body value; objects become indented JSON. */
@@ -5367,7 +5360,31 @@ function NetworkPage({ state, actions }) {
   const poll = usePoll(loadNetwork, pollMs, [queryKey])
   const entries = Array.isArray(poll.data?.entries) ? poll.data.entries : []
   const total = Number.isFinite(Number(poll.data?.total)) ? Number(poll.data.total) : entries.length
-  const counts = React.useMemo(() => fwbNetCounts(entries), [entries])
+
+  /**
+   * The routes accept `status`/`method`/`pattern`, but the list is filtered again
+   * here so the toolbar is correct no matter how much of that the host honours
+   * (a redundant pass is a no-op when the server already narrowed the rows).
+   */
+  const visible = React.useMemo(() => {
+    const needle = pattern === '' ? '' : pattern.toLowerCase()
+    return entries.filter((entry) => {
+      if (statusFilter === 'error') {
+        if (entry?.error === null || entry?.error === undefined || entry.error === '') return false
+      } else if (statusFilter !== 'all') {
+        const status = Number(entry?.status)
+        if (Number.isFinite(status) === false || status <= 0) return false
+        if (`${Math.floor(status / 100)}xx` !== statusFilter) return false
+      }
+      if (method !== '' && String(entry?.method ?? '').toUpperCase() !== method) return false
+      if (needle !== '') {
+        const haystack = `${entry?.uri ?? ''}\n${entry?.host ?? ''}\n${entry?.path ?? ''}`.toLowerCase()
+        if (haystack.includes(needle) === false) return false
+      }
+      return true
+    })
+  }, [entries, statusFilter, method, pattern])
+  const counts = React.useMemo(() => fwbNetCounts(visible), [visible])
   const failure = poll.error ?? null
 
   // Selected request detail: POST /network/detail { id, runId }.
@@ -5417,13 +5434,13 @@ function NetworkPage({ state, actions }) {
   }
 
   const onExport = () => {
-    if (entries.length === 0) {
+    if (visible.length === 0) {
       push(t('net.nothingToExport'), 'warn')
       return
     }
-    const payload = JSON.stringify({ exportedAt: Date.now(), query, total, entries }, null, 2)
+    const payload = JSON.stringify({ exportedAt: Date.now(), query, total, entries: visible }, null, 2)
     const ok = fwbDownload(`flutter-network-${Date.now()}.json`, payload, 'application/json')
-    push(ok ? t('net.exported', { n: entries.length }) : t('net.exportFailed'), ok ? 'ok' : 'error')
+    push(ok ? t('net.exported', { n: visible.length }) : t('net.exportFailed'), ok ? 'ok' : 'error')
   }
 
   const toolbar = h('div', {
@@ -5477,7 +5494,7 @@ function NetworkPage({ state, actions }) {
       borderTop: `1px solid ${T.border}`, color: T.textFaint, fontSize: 11, flexShrink: 0,
     },
   },
-    h('span', null, t('net.total', { n: total })),
+    h('span', null, visible.length === total ? t('net.total', { n: total }) : t('net.totalFiltered', { n: visible.length, total })),
     paused === true ? h('span', { style: { color: T.warn } }, t('net.paused')) : h('span', { style: { color: T.ok } }, t('net.live')),
     h('div', { style: { flex: 1 } }),
     h('span', null, `${t('net.colStatus')} 2xx/${counts['2xx']} 3xx/${counts['3xx']} 4xx/${counts['4xx']} 5xx/${counts['5xx']}`))
@@ -5491,7 +5508,7 @@ function NetworkPage({ state, actions }) {
     h('div', { style: { flex: 1, minHeight: 0, display: 'flex' } },
       h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
         listHeader,
-        h(FwbNetList, { entries, selectedId, onSelect: (entry) => setSelected(entry) }),
+        h(FwbNetList, { entries: visible, selectedId, onSelect: (entry) => setSelected(entry) }),
         footer),
       h('div', {
         style: {
@@ -5541,6 +5558,7 @@ fwbExtendLocale({
   'net.empty': '还没有 HTTP 请求',
   'net.emptyHint': '运行应用并让它发起网络请求。VM Service 的 HTTP 分析数据会实时出现在这里。',
   'net.total': '共 {n} 条',
+  'net.totalFiltered': '显示 {n} / 共 {total} 条',
   'net.colStatus': '状态',
   'net.colMethod': '方法',
   'net.colPath': '路径',
@@ -5597,6 +5615,7 @@ fwbExtendLocale({
   'net.empty': 'No HTTP requests yet',
   'net.emptyHint': 'Run the app and let it make network calls — the VM Service HTTP profile shows up here live.',
   'net.total': '{n} requests',
+  'net.totalFiltered': 'showing {n} of {total}',
   'net.colStatus': 'Status',
   'net.colMethod': 'Method',
   'net.colPath': 'Path',
@@ -5911,7 +5930,7 @@ function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, 
           onMenu()
         },
         title: t('board.moveTo'),
-        size: 'sm',
+        size: 22,
         active: menuOpen === true,
         style: { flexShrink: 0 },
       }, '⋯')),
@@ -5959,7 +5978,7 @@ function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, 
         style: {
           position: 'absolute', right: 4, top: 22, zIndex: 20, minWidth: 130, padding: 4,
           border: `1px solid ${T.borderStrong}`, borderRadius: T.radiusSm, background: T.bgRaised,
-          boxShadow: `0 6px 18px ${T.overlay ?? 'rgba(0,0,0,0.3)'}`,
+          boxShadow: `0 6px 18px ${T.overlay}`,
         },
         onClick: (event) => event.stopPropagation(),
       },
@@ -5988,7 +6007,7 @@ function FwbBoardCard({ task, index, menuOpen, menuLanes, dragging, dropTarget, 
 /* ---------------------------------------------------------------- modal -- */
 
 /** Card detail + editor: acceptance checklist, verify commands, history, result. */
-function FwbBoardCardModal({ task, act, laneList, provider, model, onClose, onChanged, push, onOpenSession }) {
+function FwbBoardCardModal({ task, act, provider, model, onClose, onChanged, push, onOpenSession }) {
   const [editing, setEditing] = React.useState(() => task?.id === null || task?.id === undefined)
   const [draft, setDraft] = React.useState(() => ({
     title: String(task?.title ?? ''),
@@ -6399,9 +6418,6 @@ function BoardPage({ state, actions }) {
   const refresh = live.refresh
 
   const performMove = async (task, lane, index, force) => {
-    const previousLane = task?.lane ?? 'backlog'
-    const previousList = tasks.filter((item) => item?.lane === previousLane).sort(fwbBoardSort)
-    const previousIndex = previousList.findIndex((item) => item?.id === task?.id)
     setOverrides({ id: task.id, lane, index })
     try {
       if (force === true) {
@@ -6417,7 +6433,6 @@ function BoardPage({ state, actions }) {
       // Roll back to the server truth and tell the user why.
       setOverrides(null)
       push(`${t('board.moveFailed')}: ${String(error?.message ?? error)}`, 'error')
-      void previousIndex
     }
   }
 
@@ -6652,7 +6667,7 @@ function BoardPage({ state, actions }) {
             },
           }, String(items.length)),
           h('div', { style: { flex: 1 } }),
-          laneId === 'backlog' ? h(IconBtn, { onClick: () => setEditing({ task: null }), title: t('board.new'), size: 'sm' }, '+') : null),
+          laneId === 'backlog' ? h(IconBtn, { onClick: () => setEditing({ task: null }), title: t('board.new'), size: 22 }, '+') : null),
 
         laneId === 'backlog'
           ? h(FwbBoardQuickAdd, { onCreate: (title) => createCard({ title, lane: 'backlog', priority: 'normal' }), busy: creating })
@@ -6703,7 +6718,6 @@ function BoardPage({ state, actions }) {
       ? h(FwbBoardCardModal, {
         task: editing.task ?? { id: null, title: '', lane: 'backlog', priority: 'normal', acceptance: [], verify: [], files: [], tags: [], history: [], result: null, agent: null },
         act,
-        laneList,
         provider: String(settings.defaultProvider ?? ''),
         model: String(settings.defaultModel ?? ''),
         onClose: () => setEditing(null),

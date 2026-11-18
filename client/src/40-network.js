@@ -226,22 +226,12 @@ function FwbCopyBtn({ value, label, notify, kind, disabled }) {
 function FwbPage({ children, notice, onDismiss, gap }) {
   return h('div', {
     style: {
-      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, flex: 1,
       color: T.text, fontSize: T.fs, fontFamily: T.font, gap: gap ?? 0,
     },
   },
     h(FwbNotice, { notice, onDismiss }),
     children)
-}
-
-/** Label/value grid used by the network drawer and the settings/quality panes. */
-function FwbKeyValues({ entries, mono }) {
-  const rows = entries === null || entries === undefined ? [] : entries
-  if (rows.length === 0) return h('div', { style: { color: T.textFaint, fontSize: 12, padding: '4px 0' } }, t('net.noHeaders'))
-  return h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(110px, 32%) 1fr', gap: '2px 10px', fontSize: 12 } },
-    rows.map((row, index) => h(React.Fragment, { key: `${row[0]}-${index}` },
-      h('div', { style: { color: T.textFaint, overflowWrap: 'anywhere' } }, String(row[0])),
-      h('div', { style: { color: T.text, overflowWrap: 'anywhere', fontFamily: mono === false ? T.font : T.mono } }, String(row[1])))))
 }
 
 /** Pretty-print a body value; objects become indented JSON. */
@@ -532,7 +522,31 @@ function NetworkPage({ state, actions }) {
   const poll = usePoll(loadNetwork, pollMs, [queryKey])
   const entries = Array.isArray(poll.data?.entries) ? poll.data.entries : []
   const total = Number.isFinite(Number(poll.data?.total)) ? Number(poll.data.total) : entries.length
-  const counts = React.useMemo(() => fwbNetCounts(entries), [entries])
+
+  /**
+   * The routes accept `status`/`method`/`pattern`, but the list is filtered again
+   * here so the toolbar is correct no matter how much of that the host honours
+   * (a redundant pass is a no-op when the server already narrowed the rows).
+   */
+  const visible = React.useMemo(() => {
+    const needle = pattern === '' ? '' : pattern.toLowerCase()
+    return entries.filter((entry) => {
+      if (statusFilter === 'error') {
+        if (entry?.error === null || entry?.error === undefined || entry.error === '') return false
+      } else if (statusFilter !== 'all') {
+        const status = Number(entry?.status)
+        if (Number.isFinite(status) === false || status <= 0) return false
+        if (`${Math.floor(status / 100)}xx` !== statusFilter) return false
+      }
+      if (method !== '' && String(entry?.method ?? '').toUpperCase() !== method) return false
+      if (needle !== '') {
+        const haystack = `${entry?.uri ?? ''}\n${entry?.host ?? ''}\n${entry?.path ?? ''}`.toLowerCase()
+        if (haystack.includes(needle) === false) return false
+      }
+      return true
+    })
+  }, [entries, statusFilter, method, pattern])
+  const counts = React.useMemo(() => fwbNetCounts(visible), [visible])
   const failure = poll.error ?? null
 
   // Selected request detail: POST /network/detail { id, runId }.
@@ -582,13 +596,13 @@ function NetworkPage({ state, actions }) {
   }
 
   const onExport = () => {
-    if (entries.length === 0) {
+    if (visible.length === 0) {
       push(t('net.nothingToExport'), 'warn')
       return
     }
-    const payload = JSON.stringify({ exportedAt: Date.now(), query, total, entries }, null, 2)
+    const payload = JSON.stringify({ exportedAt: Date.now(), query, total, entries: visible }, null, 2)
     const ok = fwbDownload(`flutter-network-${Date.now()}.json`, payload, 'application/json')
-    push(ok ? t('net.exported', { n: entries.length }) : t('net.exportFailed'), ok ? 'ok' : 'error')
+    push(ok ? t('net.exported', { n: visible.length }) : t('net.exportFailed'), ok ? 'ok' : 'error')
   }
 
   const toolbar = h('div', {
@@ -642,7 +656,7 @@ function NetworkPage({ state, actions }) {
       borderTop: `1px solid ${T.border}`, color: T.textFaint, fontSize: 11, flexShrink: 0,
     },
   },
-    h('span', null, t('net.total', { n: total })),
+    h('span', null, visible.length === total ? t('net.total', { n: total }) : t('net.totalFiltered', { n: visible.length, total })),
     paused === true ? h('span', { style: { color: T.warn } }, t('net.paused')) : h('span', { style: { color: T.ok } }, t('net.live')),
     h('div', { style: { flex: 1 } }),
     h('span', null, `${t('net.colStatus')} 2xx/${counts['2xx']} 3xx/${counts['3xx']} 4xx/${counts['4xx']} 5xx/${counts['5xx']}`))
@@ -656,7 +670,7 @@ function NetworkPage({ state, actions }) {
     h('div', { style: { flex: 1, minHeight: 0, display: 'flex' } },
       h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
         listHeader,
-        h(FwbNetList, { entries, selectedId, onSelect: (entry) => setSelected(entry) }),
+        h(FwbNetList, { entries: visible, selectedId, onSelect: (entry) => setSelected(entry) }),
         footer),
       h('div', {
         style: {
@@ -706,6 +720,7 @@ fwbExtendLocale({
   'net.empty': '还没有 HTTP 请求',
   'net.emptyHint': '运行应用并让它发起网络请求。VM Service 的 HTTP 分析数据会实时出现在这里。',
   'net.total': '共 {n} 条',
+  'net.totalFiltered': '显示 {n} / 共 {total} 条',
   'net.colStatus': '状态',
   'net.colMethod': '方法',
   'net.colPath': '路径',
@@ -762,6 +777,7 @@ fwbExtendLocale({
   'net.empty': 'No HTTP requests yet',
   'net.emptyHint': 'Run the app and let it make network calls — the VM Service HTTP profile shows up here live.',
   'net.total': '{n} requests',
+  'net.totalFiltered': 'showing {n} of {total}',
   'net.colStatus': 'Status',
   'net.colMethod': 'Method',
   'net.colPath': 'Path',

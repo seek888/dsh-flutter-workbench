@@ -532,6 +532,7 @@ function useApiState() {
     paused,
     draft,
     toasts: toastQueue.toasts,
+    toast: toastQueue.toast,
     conn: {
       ok: snapshotPoll.error === null && snapshot !== null,
       error: snapshotPoll.error,
