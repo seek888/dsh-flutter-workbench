@@ -1670,6 +1670,7 @@ const ICONS = {
   pause: ['M6 4v8M10 4v8'],
   camera: ['M3 5.5h2.2L6.5 4h3L10.8 5.5H13V13H3z', 'M8 7.4a2.2 2.2 0 100 4.4 2.2 2.2 0 000-4.4z'],
   code: ['M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4'],
+  download: ['M8 3v7.5M4.5 7.5L8 11l3.5-3.5', 'M3.5 13h9'],
   file: ['M4 2.5h5l3 3v8H4z', 'M9 2.5v3h3'],
 }
 
@@ -3141,53 +3142,2488 @@ function WorkbenchApp() {
     /* ==== 20-runtime.js ==== */
 /* ====================================================================== *
  * 20-runtime.js — owner: dev-ui-core
- * RuntimePage: project/config/device pickers, run controls, live status.
- * PLACEHOLDER: replace with the real implementation per docs/CONTRACTS.md §8.2.
+ *
+ * Two things:
+ *  1. `useApiState()` — the single shared state + actions layer every page
+ *     receives (CONTRACTS §8.2). It polls `/state` at the configured cadence,
+ *     stops polling while the document is hidden, and reports a connection
+ *     error instead of throwing.
+ *  2. `RuntimePage({ state, actions })` — project / config / device / mode
+ *     pickers, the start/stop/reload/restart toolbar with optimistic phase,
+ *     the live run detail (VM URI + DevTools) and a recent-run summary.
  * ====================================================================== */
 
-function RuntimePage({ state }) {
-  return h(PageStub, { name: t('nav.runtime') })
+/** Run phases that mean "a child process exists". */
+const LIVE_PHASES = ['starting', 'running', 'reloading', 'restarting']
+/** Default poll cadence before /state has delivered `settings.autoRefreshMs`. */
+const DEFAULT_REFRESH_MS = 2000
+
+/* ---------------------------------------------------------------------- *
+ * Small pure helpers (unique names: the bundle shares one scope)
+ * ---------------------------------------------------------------------- */
+
+/** object → `[{ key, value }]` rows for the dart-define editor. */
+function definesToRows(defines) {
+  if (defines === null || typeof defines !== 'object') return []
+  return Object.keys(defines).map((key) => ({ key, value: String(defines[key] ?? '') }))
 }
 
-/** Shared application state + actions (contract §8.2). PLACEHOLDER. */
-function useApiState() {
-  const snapshot = usePoll(() => api('/state'), 2000)
-  const [toast, setToast] = React.useState(null)
+/** `[{ key, value }]` rows → object, dropping empty keys and duplicates. */
+function rowsToDefines(rows) {
+  const result = {}
+  for (const row of rows ?? []) {
+    const key = String(row?.key ?? '').trim()
+    if (key === '') continue
+    result[key] = String(row?.value ?? '')
+  }
+  return result
+}
 
-  const actions = React.useMemo(() => ({
-    refreshAll: () => snapshot.refresh(),
-    toast: (message, tone) => setToast({ message: String(message ?? ''), tone: tone ?? 'info' }),
-  }), [snapshot])
+/** Split a space separated argument string; honors "double quoted" groups. */
+function parseArgsText(text) {
+  const value = String(text ?? '').trim()
+  if (value === '') return []
+  const parts = value.match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+  return parts.map((part) => part.replace(/^["']|["']$/g, ''))
+}
+
+/** Non-empty string or undefined, for request bodies. */
+function optionalText(value) {
+  const text = String(value ?? '').trim()
+  return text === '' ? undefined : text
+}
+
+/** Whether a run phase means "live". */
+function isLivePhase(phase) {
+  return LIVE_PHASES.includes(String(phase ?? ''))
+}
+
+/** Build the `/run/start` body from the draft plus caller overrides. */
+function draftToRunBody(draft, overrides) {
+  const merged = { ...(draft ?? {}), ...(overrides ?? {}) }
+  const body = {
+    projectId: merged.projectId === undefined || merged.projectId === null ? undefined : merged.projectId,
+    configId: merged.configId === undefined || merged.configId === null || merged.configId === '' ? undefined : merged.configId,
+    program: optionalText(merged.program),
+    deviceId: optionalText(merged.deviceId),
+    mode: optionalText(merged.mode) ?? 'debug',
+    flavor: optionalText(merged.flavor),
+    dartDefines: merged.dartDefines !== null && typeof merged.dartDefines === 'object' ? merged.dartDefines : {},
+    args: Array.isArray(merged.args) ? merged.args : parseArgsText(merged.args),
+  }
+  return body
+}
+
+/* ---------------------------------------------------------------------- *
+ * useApiState — shared state + actions (§8.2)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The workbench's shared state. One `/state` poll drives the shell; every
+ * other endpoint is pulled on demand by the page that needs it (and mirrored
+ * here so a page switch keeps the last window).
+ * @returns {object} state + actions (§8.2 shape).
+ */
+function useApiState() {
+  ensureStyles()
+
+  const [paused, setPausedFlag] = React.useState(false)
+  const [cadence, setCadence] = React.useState(DEFAULT_REFRESH_MS)
+  const [draft, setDraftState] = React.useState({
+    projectId: null,
+    configId: null,
+    program: '',
+    deviceId: '',
+    mode: 'debug',
+    flavor: '',
+    dartDefines: {},
+    args: '',
+  })
+  const [configState, setConfigState] = React.useState({
+    projectId: null,
+    configs: [],
+    entries: [],
+    devices: [],
+    emulators: [],
+    flavors: [],
+    launchFile: null,
+    warnings: [],
+    loading: false,
+    error: null,
+  })
+  const [logs, setLogs] = React.useState({ entries: [], nextCursor: 0, total: 0 })
+  const [errors, setErrors] = React.useState({ groups: [], nextCursor: 0, total: 0 })
+  const [network, setNetwork] = React.useState({ entries: [], nextCursor: 0, total: 0 })
+  const [board, setBoard] = React.useState(null)
+  const [jobs, setJobs] = React.useState([])
+
+  const toastQueue = useToast()
+  const showToast = toastQueue.show
+
+  const snapshotPoll = usePoll(
+    () => api('/state'),
+    paused === true ? 0 : cadence,
+    [paused, cadence],
+  )
+  const snapshot = snapshotPoll.data ?? null
+  const activeProjectId = snapshot?.activeProjectId ?? null
+  const activeProjectRef = React.useRef(activeProjectId)
+  activeProjectRef.current = activeProjectId
+
+  /* Adopt the host refresh cadence once /state delivers settings. */
+  React.useEffect(() => {
+    const next = Number(snapshot?.settings?.autoRefreshMs)
+    if (Number.isFinite(next) && next >= 500 && next <= 60000 && next !== cadence) setCadence(next)
+  }, [snapshot, cadence])
+
+  /** Refresh `/state` and return the fresh snapshot (or null on failure). */
+  const refreshAll = React.useCallback(async () => {
+    const value = await snapshotPoll.refresh()
+    return value
+  }, [snapshotPoll.refresh])
+
+  const setDraft = React.useCallback((patch) => {
+    setDraftState((previous) => {
+      const next = { ...previous, ...(patch ?? {}) }
+      return next
+    })
+  }, [])
+
+  const setPaused = React.useCallback((next) => {
+    setPausedFlag(next === true)
+  }, [])
+
+  const toast = React.useCallback((message, tone) => showToast(message, tone ?? 'info'), [showToast])
+  const dismissToast = toastQueue.dismiss
+
+  /* ---- projects ------------------------------------------------------ */
+
+  const selectProject = React.useCallback(async (id) => {
+    const data = await api('/project/select', { method: 'POST', body: { id } })
+    setDraftState((previous) => ({ ...previous, projectId: data.activeProjectId ?? id, configId: null, program: '' }))
+    await snapshotPoll.refresh()
+    return data
+  }, [snapshotPoll.refresh])
+
+  const addProject = React.useCallback(async (path) => {
+    const data = await api('/project/add', { method: 'POST', body: { path } })
+    await snapshotPoll.refresh()
+    const project = data.project ?? null
+    if (project?.id !== undefined) {
+      setDraftState((previous) => ({ ...previous, projectId: project.id, configId: null, program: '' }))
+      try {
+        await api('/project/select', { method: 'POST', body: { id: project.id } })
+      } catch {
+        /* the project exists; selection is a convenience */
+      }
+      await snapshotPoll.refresh()
+    }
+    return data
+  }, [snapshotPoll.refresh])
+
+  const removeProject = React.useCallback(async (id) => {
+    const data = await api('/project/remove', { method: 'POST', body: { id } })
+    setDraftState((previous) => (previous.projectId === id ? { ...previous, projectId: null, configId: null, program: '' } : previous))
+    await snapshotPoll.refresh()
+    return data
+  }, [snapshotPoll.refresh])
+
+  /* ---- configs / devices -------------------------------------------- */
+
+  const loadConfigs = React.useCallback(async (projectId) => {
+    const target = projectId ?? activeProjectRef.current
+    if (target === null || target === undefined || target === '') {
+      const empty = {
+        projectId: null, configs: [], entries: [], devices: [], emulators: [], flavors: [],
+        launchFile: null, warnings: [], loading: false, error: null,
+      }
+      setConfigState(empty)
+      return empty
+    }
+    setConfigState((previous) => ({ ...previous, loading: true, error: null }))
+    try {
+      const data = await api('/configs', { query: { projectId: target } })
+      const next = {
+        projectId: target,
+        configs: Array.isArray(data.configs) ? data.configs : [],
+        entries: Array.isArray(data.entries) ? data.entries : [],
+        devices: Array.isArray(data.devices) ? data.devices : [],
+        emulators: Array.isArray(data.emulators) ? data.emulators : [],
+        flavors: Array.isArray(data.flavors) ? data.flavors : [],
+        launchFile: data.launchFile ?? null,
+        warnings: Array.isArray(data.warnings) ? data.warnings : [],
+        loading: false,
+        error: null,
+      }
+      setConfigState(next)
+      setDraftState((previous) => seedDraft(previous, next))
+      return next
+    } catch (error) {
+      setConfigState((previous) => ({ ...previous, loading: false, error }))
+      throw error
+    }
+  }, [])
+
+  /* Auto-load configs whenever the selected project changes. */
+  React.useEffect(() => {
+    if (activeProjectId === null || activeProjectId === undefined) return
+    if (configState.projectId === activeProjectId) return
+    if (configState.loading === true) return
+    loadConfigs(activeProjectId).catch((error) => {
+      showToast(t('runtime.configLoadFailed', { message: error?.message ?? String(error) }), 'error')
+    })
+  }, [activeProjectId, configState.projectId, configState.loading, loadConfigs, showToast])
+
+  /* ---- run lifecycle ------------------------------------------------- */
+
+  const startRun = React.useCallback(async (input) => {
+    const body = draftToRunBody(draft, input)
+    if (body.projectId === undefined || body.projectId === null) body.projectId = activeProjectRef.current ?? undefined
+    const data = await api('/run/start', { method: 'POST', body })
+    await snapshotPoll.refresh()
+    return data
+  }, [draft, snapshotPoll.refresh])
+
+  const stopRun = React.useCallback(async (runId) => {
+    const body = {}
+    const target = runId ?? snapshot?.activeRunId ?? null
+    if (target !== null && target !== undefined) body.runId = target
+    const data = await api('/run/stop', { method: 'POST', body })
+    await snapshotPoll.refresh()
+    return data
+  }, [snapshot?.activeRunId, snapshotPoll.refresh])
+
+  const hotReload = React.useCallback(async (runId) => {
+    const body = {}
+    const target = runId ?? snapshot?.activeRunId ?? null
+    if (target !== null && target !== undefined) body.runId = target
+    const data = await api('/run/reload', { method: 'POST', body })
+    await snapshotPoll.refresh()
+    return data
+  }, [snapshot?.activeRunId, snapshotPoll.refresh])
+
+  const hotRestart = React.useCallback(async (runId) => {
+    const body = {}
+    const target = runId ?? snapshot?.activeRunId ?? null
+    if (target !== null && target !== undefined) body.runId = target
+    const data = await api('/run/restart', { method: 'POST', body })
+    await snapshotPoll.refresh()
+    return data
+  }, [snapshot?.activeRunId, snapshotPoll.refresh])
+
+  /* ---- logs / errors / network --------------------------------------- */
+
+  const fetchLogs = React.useCallback(async (query) => {
+    const data = await api('/logs', { query })
+    const payload = {
+      entries: Array.isArray(data.entries) ? data.entries : [],
+      nextCursor: Number(data.nextCursor ?? 0),
+      total: Number(data.total ?? 0),
+      dropped: Number(data.dropped ?? 0),
+    }
+    setLogs(payload)
+    return payload
+  }, [])
+
+  const fetchErrors = React.useCallback(async (query) => {
+    const data = await api('/errors', { query })
+    const payload = {
+      groups: Array.isArray(data.groups) ? data.groups : [],
+      nextCursor: Number(data.nextCursor ?? 0),
+      total: Number(data.total ?? 0),
+    }
+    setErrors(payload)
+    return payload
+  }, [])
+
+  const fetchNetwork = React.useCallback(async (query) => {
+    const data = await api('/network', { query })
+    const payload = {
+      entries: Array.isArray(data.entries) ? data.entries : [],
+      nextCursor: Number(data.nextCursor ?? 0),
+      total: Number(data.total ?? 0),
+    }
+    setNetwork(payload)
+    return payload
+  }, [])
+
+  const networkDetail = React.useCallback(async (input) => {
+    const data = await api('/network/detail', { method: 'POST', body: { id: input?.id, runId: input?.runId } })
+    return data.request ?? data
+  }, [])
+
+  const markLog = React.useCallback(async (text) => {
+    const data = await api('/logs/mark', { method: 'POST', body: { text: String(text ?? '') } })
+    return data
+  }, [])
+
+  /* ---- jobs / toolchain ---------------------------------------------- */
+
+  const listJobs = React.useCallback(async (limit) => {
+    const data = await api('/jobs', { query: limit === undefined ? undefined : { limit } })
+    const payload = Array.isArray(data.jobs) ? data.jobs : []
+    setJobs(payload)
+    return payload
+  }, [])
+
+  const getJob = React.useCallback(async (id) => {
+    const data = await api('/job', { query: { id } })
+    return data.job ?? data
+  }, [])
+
+  const runToolchain = React.useCallback(async (input) => {
+    const body = {
+      action: input?.action,
+      projectId: input?.projectId ?? activeProjectRef.current ?? undefined,
+      target: input?.target,
+      name: input?.name,
+    }
+    const data = await api('/toolchain', { method: 'POST', body })
+    void listJobs().catch(() => undefined)
+    return data
+  }, [listJobs])
+
+  const screenshot = React.useCallback(async (input) => {
+    const body = {}
+    const target = input?.runId ?? snapshot?.activeRunId ?? null
+    if (target !== null && target !== undefined) body.runId = target
+    const data = await api('/screenshot', { method: 'POST', body })
+    return data
+  }, [snapshot?.activeRunId])
+
+  /* ---- board --------------------------------------------------------- */
+
+  const adoptBoard = React.useCallback((data) => {
+    if (data !== null && data !== undefined && data.board !== undefined && data.board !== null) {
+      setBoard(data.board)
+      return data.board
+    }
+    return null
+  }, [])
+
+  const refreshBoard = React.useCallback(async () => {
+    const data = await api('/board')
+    const next = data.board ?? null
+    setBoard(next)
+    return next
+  }, [])
+
+  const boardAction = React.useCallback(async (body) => {
+    const data = await api('/board/task', { method: 'POST', body })
+    adoptBoard(data)
+    if (data.board === undefined) await refreshBoard().catch(() => undefined)
+    return data
+  }, [adoptBoard, refreshBoard])
+
+  const createTask = React.useCallback((input) => boardAction({ action: 'create', ...(input ?? {}) }), [boardAction])
+  const updateTask = React.useCallback((input) => boardAction({ action: 'update', id: input?.id, patch: input?.patch ?? {} }), [boardAction])
+  const moveTask = React.useCallback((input) => boardAction({ action: 'move', id: input?.id, lane: input?.lane, index: input?.index }), [boardAction])
+  const deleteTask = React.useCallback((id) => boardAction({ action: 'delete', id }), [boardAction])
+  const archiveDone = React.useCallback(() => boardAction({ action: 'archive' }), [boardAction])
+
+  const decompose = React.useCallback(async (input) => {
+    const body = {
+      prompt: String(input?.prompt ?? ''),
+      projectId: input?.projectId ?? activeProjectRef.current ?? undefined,
+      maxTasks: input?.maxTasks,
+    }
+    const data = await api('/board/decompose', { method: 'POST', body })
+    await refreshBoard().catch(() => undefined)
+    return data
+  }, [refreshBoard])
+
+  const dispatchTask = React.useCallback(async (input) => {
+    const data = await api('/board/dispatch', { method: 'POST', body: { id: input?.id, provider: input?.provider, model: input?.model } })
+    adoptBoard(data)
+    return data
+  }, [adoptBoard])
+
+  const reportTask = React.useCallback(async (input) => {
+    const data = await api('/board/report', { method: 'POST', body: input ?? {} })
+    adoptBoard(data)
+    return data
+  }, [adoptBoard])
+
+  /* ---- settings ------------------------------------------------------ */
+
+  const saveSettings = React.useCallback(async (patch) => {
+    const data = await api('/settings', { method: 'POST', body: { patch: patch ?? {} } })
+    await snapshotPoll.refresh()
+    return data.settings ?? null
+  }, [snapshotPoll.refresh])
+
+  /* ---- editor bridge / misc ------------------------------------------ */
+
+  /**
+   * Open `file:line`. The host endpoint is `POST /open` (see the t6 report:
+   * CONTRACTS §6 needed this route). It never throws: when the route is
+   * missing the path is copied to the clipboard and a toast explains it.
+   */
+  const openFile = React.useCallback(async (file, line) => {
+    const target = file !== null && typeof file === 'object'
+      ? { file: file.file, line: file.line }
+      : { file, line }
+    const filePath = String(target.file ?? '')
+    if (filePath === '') return { ok: false }
+    try {
+      const data = await api('/open', { method: 'POST', body: { file: filePath, line: target.line ?? null } })
+      return { ok: true, data }
+    } catch (error) {
+      const label = target.line === undefined || target.line === null ? filePath : `${filePath}:${target.line}`
+      const copied = await copyText(label)
+      showToast(t('logs.openFailed', { message: `${error?.message ?? String(error)} · ${copied ? label : t('common.copyFailed')}` }), 'error')
+      return { ok: false, copied, error }
+    }
+  }, [showToast])
+
+  const refreshAllAndConfigs = React.useCallback(async () => {
+    await refreshAll()
+    if (activeProjectRef.current !== null && activeProjectRef.current !== undefined) {
+      await loadConfigs(activeProjectRef.current).catch(() => undefined)
+    }
+  }, [loadConfigs, refreshAll])
+
+  /* ---- derived state ------------------------------------------------- */
+
+  const projects = Array.isArray(snapshot?.projects) ? snapshot.projects : []
+  const runs = Array.isArray(snapshot?.runs) ? snapshot.runs : []
+  const activeRunId = snapshot?.activeRunId ?? null
+  const activeRun = runs.find((run) => run.runId === activeRunId) ?? null
+  const settings = snapshot?.settings ?? null
+  const hostBoard = snapshot?.board ?? null
+  const effectiveBoard = board ?? hostBoard
+  const hostCounters = snapshot?.counters ?? {}
+  const counters = {
+    projects: projects.length,
+    runs: runs.length,
+    running: runs.filter((run) => isLivePhase(run.phase)).length,
+    logs: Number(hostCounters.logs ?? logs.total ?? 0),
+    errors: Number(hostCounters.errors ?? errors.total ?? 0),
+    network: Number(hostCounters.network ?? network.total ?? 0),
+    tasks: Array.isArray(effectiveBoard?.tasks) ? effectiveBoard.tasks.length : Number(hostCounters.tasks ?? 0),
+  }
+
+  const actions = {
+    /* projects */
+    selectProject,
+    addProject,
+    removeProject,
+    /* configs */
+    loadConfigs,
+    /* runs */
+    startRun,
+    stopRun,
+    hotReload,
+    hotRestart,
+    /* windows pulled on demand */
+    fetchLogs,
+    fetchErrors,
+    fetchNetwork,
+    networkDetail,
+    markLog,
+    /* toolchain + jobs */
+    runToolchain,
+    getJob,
+    listJobs,
+    screenshot,
+    /* board */
+    refreshBoard,
+    createTask,
+    updateTask,
+    moveTask,
+    deleteTask,
+    archiveDone,
+    decompose,
+    dispatchTask,
+    reportTask,
+    /* settings + editor + ui */
+    saveSettings,
+    openFile,
+    toast,
+    dismissToast,
+    refreshAll,
+    refreshAllAndConfigs,
+    setPaused,
+    setDraft,
+  }
 
   return {
-    snapshot: snapshot.data,
-    conn: { ok: snapshot.error === null && snapshot.data !== null, error: snapshot.error },
-    toast,
+    /* app state */
+    snapshot,
+    projects,
+    activeProjectId,
+    runs,
+    activeRunId,
+    activeRun,
+    configs: configState.configs,
+    configEntries: configState.entries,
+    devices: configState.devices,
+    emulators: configState.emulators,
+    flavors: configState.flavors,
+    launchFile: configState.launchFile,
+    configWarnings: configState.warnings,
+    configLoading: configState.loading,
+    configError: configState.error,
+    logs,
+    errors,
+    network,
+    board: effectiveBoard,
+    jobs,
+    settings,
+    counters,
+    paused,
+    draft,
+    toasts: toastQueue.toasts,
+    conn: {
+      ok: snapshotPoll.error === null && snapshot !== null,
+      error: snapshotPoll.error,
+      loading: snapshotPoll.loading,
+      lastOkAt: snapshotPoll.lastOkAt,
+    },
+    /* actions (§8.2) */
     actions,
   }
+}
+
+/**
+ * Seed the run draft from freshly loaded configs. Keeps the user's picks when
+ * the same project is reloaded and the chosen config still exists.
+ */
+function seedDraft(previous, loaded) {
+  const configs = loaded?.configs ?? []
+  const devices = loaded?.devices ?? []
+  const sameProject = previous.projectId === loaded?.projectId
+  const keep = sameProject && configs.some((config) => config.id === previous.configId)
+  if (keep) {
+    return { ...previous, deviceId: previous.deviceId === '' && devices.length > 0 ? (devices[0].id ?? '') : previous.deviceId }
+  }
+  const config = configs.length > 0 ? configs[0] : null
+  if (config !== null) {
+    return {
+      projectId: loaded?.projectId ?? null,
+      configId: config.id ?? null,
+      program: config.program ?? '',
+      deviceId: config.deviceId ?? (devices[0]?.id ?? ''),
+      mode: config.mode ?? 'debug',
+      flavor: config.flavor ?? '',
+      dartDefines: config.dartDefines !== null && typeof config.dartDefines === 'object' ? { ...config.dartDefines } : {},
+      args: Array.isArray(config.args) ? config.args.join(' ') : '',
+    }
+  }
+  return {
+    projectId: loaded?.projectId ?? null,
+    configId: null,
+    program: 'lib/main.dart',
+    deviceId: devices[0]?.id ?? '',
+    mode: 'debug',
+    flavor: '',
+    dartDefines: {},
+    args: '',
+  }
+}
+
+/* ---------------------------------------------------------------------- *
+ * RuntimePage
+ * ---------------------------------------------------------------------- */
+
+/** One label/value row in the run detail card. */
+function RunDetailRow({ label, children, mono, wrap }) {
+  return h('div', {
+    style: { display: 'grid', gridTemplateColumns: '92px minmax(0, 1fr)', gap: 8, alignItems: 'baseline', padding: '2px 0' },
+  },
+    h('div', { style: { color: T.textFaint, fontSize: T.fsXs } }, label),
+    h('div', {
+      style: {
+        minWidth: 0,
+        fontSize: T.fsSm,
+        color: T.text,
+        fontFamily: mono === true ? T.mono : 'inherit',
+        whiteSpace: wrap === false ? 'nowrap' : 'normal',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        wordBreak: 'break-word',
+      },
+    }, children))
+}
+
+/** A selectable run-configuration card. */
+function ConfigCard({ config, selected, onSelect }) {
+  const [hover, bind] = useHover()
+  const sourceKey = config.source === 'launch.json' ? 'runtime.configSourceLaunch' : config.source === 'entry' ? 'runtime.configSourceEntry' : 'runtime.configSourceManual'
+  const defines = config.dartDefines !== null && typeof config.dartDefines === 'object' ? Object.keys(config.dartDefines).length : 0
+  return h('button', {
+    type: 'button',
+    onClick: onSelect,
+    ...bind,
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
+      width: '100%',
+      textAlign: 'left',
+      padding: '7px 9px',
+      borderRadius: T.radiusSm,
+      border: `1px solid ${selected === true ? T.brand : T.border}`,
+      background: selected === true ? T.selected : hover ? T.hover : 'transparent',
+      color: T.text,
+      cursor: 'pointer',
+    },
+  },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, width: '100%' } },
+      h('span', { style: { flex: 1, minWidth: 0, fontWeight: 600, fontSize: T.fsSm, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, config.label ?? config.id),
+      config.source === undefined ? null : h(Pill, { tone: config.source === 'launch.json' ? 'info' : 'neutral' }, t(sourceKey))),
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: T.fsXs, color: T.textFaint } },
+      h('span', { style: { fontFamily: T.mono } }, config.program ?? 'lib/main.dart'),
+      config.mode === undefined ? null : h('span', null, `· ${config.mode}`),
+      config.deviceId === undefined || config.deviceId === null || config.deviceId === '' ? null : h('span', null, `· ${config.deviceId}`),
+      h('span', null, `· ${t('runtime.definesCount', { n: defines })}`)))
+}
+
+/**
+ * Runtime page: project/config/device/mode pickers, run controls with an
+ * optimistic phase, the live run detail and the recent-run summary.
+ * @param {{state: object, actions: object}} props page props from the shell.
+ * @returns {any} page element.
+ */
+function RuntimePage({ state: sharedState, actions: sharedActions }) {
+  ensureStyles()
+  const s = sharedState ?? {}
+  const a = sharedActions ?? s.actions ?? {}
+  const draft = s.draft ?? {}
+  const configs = s.configs ?? []
+  const devices = s.devices ?? []
+  const projects = s.projects ?? []
+  const runs = s.runs ?? []
+  const activeRun = runs.find((run) => run.runId === s.activeRunId) ?? null
+  const [pending, setPending] = React.useState(null)
+  const [defineRows, setDefineRows] = React.useState(() => definesToRows(draft.dartDefines))
+  const [argsText, setArgsText] = React.useState(draft.args ?? '')
+  const [addPath, setAddPath] = React.useState('')
+  const [addOpen, setAddOpen] = React.useState(false)
+  const [addBusy, setAddBusy] = React.useState(false)
+  const [now, setNow] = React.useState(() => Date.now())
+
+  /* Re-seed the local editors when the draft jumps to another config. */
+  const draftKey = `${draft.projectId ?? ''}|${draft.configId ?? ''}`
+  React.useEffect(() => {
+    setDefineRows(definesToRows(draft.dartDefines))
+    setArgsText(String(draft.args ?? ''))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey])
+
+  /* Clear the optimistic phase as soon as the host reports a new one. */
+  const livePhase = activeRun?.phase ?? 'idle'
+  React.useEffect(() => { setPending(null) }, [livePhase, activeRun?.runId])
+
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const displayPhase = pending ?? livePhase
+  const busy = displayPhase === 'starting' || displayPhase === 'stopping'
+  const live = isLivePhase(displayPhase)
+  const canStart = s.activeProjectId !== undefined && s.activeProjectId !== null && busy !== true && displayPhase !== 'stopping'
+
+  const runWith = (phase, task, failKey) => async () => {
+    setPending(phase)
+    try {
+      await task()
+    } catch (error) {
+      a.toast?.(t(failKey, { message: error?.message ?? String(error) }), 'error')
+    } finally {
+      setPending(null)
+    }
+  }
+
+  const onStart = runWith('starting', async () => {
+    const data = await (a.startRun === undefined
+      ? Promise.reject(new Error(t('common.error')))
+      : a.startRun())
+    if (data?.runId !== undefined) a.toast?.(t('runtime.started', { id: data.runId }), 'ok')
+  }, 'runtime.startFailed')
+
+  const onStop = runWith('stopping', async () => {
+    const data = await (a.stopRun === undefined ? Promise.reject(new Error(t('common.error'))) : a.stopRun())
+    a.toast?.(t('runtime.stopped', { n: (data?.stopped ?? []).length ?? 0 }), 'ok')
+  }, 'runtime.stopFailed')
+
+  const onReload = runWith('reloading', async () => {
+    await (a.hotReload === undefined ? Promise.reject(new Error(t('common.error'))) : a.hotReload())
+    a.toast?.(t('runtime.reloaded'), 'ok')
+  }, 'runtime.reloadFailed')
+
+  const onRestart = runWith('restarting', async () => {
+    await (a.hotRestart === undefined ? Promise.reject(new Error(t('common.error'))) : a.hotRestart())
+    a.toast?.(t('runtime.restarted'), 'ok')
+  }, 'runtime.restartFailed')
+
+  const rescan = async () => {
+    try {
+      await (a.loadConfigs === undefined
+        ? Promise.reject(new Error(t('common.error')))
+        : a.loadConfigs(s.activeProjectId))
+    } catch (error) {
+      a.toast?.(t('runtime.configLoadFailed', { message: error?.message ?? String(error) }), 'error')
+    }
+  }
+
+  const submitAddProject = async () => {
+    const path = addPath.trim()
+    if (path === '') {
+      a.toast?.(t('shell.addProjectEmpty'), 'warn')
+      return
+    }
+    setAddBusy(true)
+    try {
+      const data = await (a.addProject === undefined ? Promise.reject(new Error(t('common.error'))) : a.addProject(path))
+      a.toast?.(t('shell.projectAdded', { name: data?.project?.name ?? path }), 'ok')
+      setAddOpen(false)
+      setAddPath('')
+    } catch (error) {
+      a.toast?.(t('common.actionFailed', { message: error?.message ?? String(error) }), 'error')
+    } finally {
+      setAddBusy(false)
+    }
+  }
+
+  /* Keep the draft in sync with the local define/args editors. */
+  const commitDefines = (rows) => {
+    setDefineRows(rows)
+    a.setDraft?.({ dartDefines: rowsToDefines(rows) })
+  }
+  const commitArgs = (text) => {
+    setArgsText(text)
+    a.setDraft?.({ args: text })
+  }
+
+  const deviceOptions = devices.map((device) => ({
+    value: device.id,
+    label: `${device.name ?? device.id}${device.platform === undefined ? '' : ` · ${device.platform}`}${device.emulator === true ? ' · emu' : ''}`,
+  }))
+
+  const vmUri = activeRun?.vmServiceUri ?? null
+  const devtoolsUrl = activeRun?.devtoolsUrl !== null && activeRun?.devtoolsUrl !== undefined
+    ? activeRun.devtoolsUrl
+    : (vmUri === null ? null : `https://devtools.flutter.dev/?uri=${encodeURIComponent(vmUri)}`)
+  const uptime = activeRun === null
+    ? 0
+    : (activeRun.finishedAt === null || activeRun.finishedAt === undefined ? now : activeRun.finishedAt) - (activeRun.startedAt ?? now)
+
+  const pickProject = async (value) => {
+    if (value === '') return
+    try {
+      await (a.selectProject === undefined ? Promise.reject(new Error(t('common.error'))) : a.selectProject(value))
+    } catch (error) {
+      a.toast?.(t('common.actionFailed', { message: error?.message ?? String(error) }), 'error')
+    }
+  }
+
+  const recentRuns = runs.slice(-6).reverse()
+
+  /* ---- left column: controls ---------------------------------------- */
+  const left = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, padding: 12, minWidth: 0 } },
+    h(Card, {
+      title: t('runtime.controls'),
+      subtitle: t('runtime.subtitle'),
+      right: h(IconBtn, { icon: 'refresh', title: t('runtime.refreshConfigs'), onClick: rescan }),
+    },
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+        /* project */
+        h(Field, { label: t('runtime.project'), hint: projects.length === 0 ? t('runtime.noProject') : t('runtime.projectHint') },
+          h('div', { style: { display: 'flex', gap: 6 } },
+            h(Select, {
+              value: s.activeProjectId ?? '',
+              options: projects.map((project) => ({ value: project.id, label: project.name ?? project.path ?? project.id })),
+              placeholder: projects.length === 0 ? t('shell.noProject') : t('shell.projectPlaceholder'),
+              onChange: (value) => { void pickProject(value) },
+            }),
+            h(IconBtn, { icon: 'plus', title: t('shell.addProject'), onClick: () => setAddOpen(true) }))),
+        /* configs */
+        h(Field, { label: t('runtime.config'), hint: configs.length === 0 ? t('runtime.configEmptyHint') : undefined },
+          s.configLoading === true
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, color: T.textDim, fontSize: T.fsSm } }, h(Spinner, null), t('common.loading'))
+            : configs.length === 0
+              ? h(Empty, { text: t('runtime.configEmpty'), compact: true })
+              : h('div', { className: 'fwb-scroll', style: { display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 220, overflow: 'auto' } },
+                configs.map((config) => h(ConfigCard, {
+                  key: config.id ?? config.label,
+                  config,
+                  selected: config.id === draft.configId,
+                  onSelect: () => a.setDraft?.({
+                    configId: config.id ?? null,
+                    program: config.program ?? '',
+                    deviceId: config.deviceId ?? '',
+                    mode: config.mode ?? 'debug',
+                    flavor: config.flavor ?? '',
+                    dartDefines: config.dartDefines ?? {},
+                    args: Array.isArray(config.args) ? config.args.join(' ') : '',
+                  }),
+                })))),
+        /* device */
+        h(Field, { label: t('runtime.device'), hint: devices.length === 0 ? t('runtime.noDevice') : t('runtime.deviceCount', { n: devices.length }) },
+          h('div', { style: { display: 'flex', gap: 6 } },
+            h(Select, {
+              value: draft.deviceId ?? '',
+              options: deviceOptions,
+              placeholder: devices.length === 0 ? t('device.none') : t('device.select'),
+              onChange: (value) => a.setDraft?.({ deviceId: value }),
+            }),
+            h(IconBtn, { icon: 'refresh', title: t('runtime.deviceRefresh'), onClick: rescan }))),
+        /* mode */
+        h(Field, { label: t('runtime.mode'), hint: draft.mode === 'release' ? t('runtime.modeReleaseHint') : draft.mode === 'profile' ? t('runtime.modeProfileHint') : t('runtime.modeDebugHint') },
+          h('div', { style: { display: 'flex', gap: 4 } },
+            ['debug', 'profile', 'release'].map((mode) => h(Chip, {
+              key: mode,
+              active: draft.mode === mode,
+              onClick: () => a.setDraft?.({ mode }),
+            }, mode)))),
+        /* flavor + program */
+        h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
+          h(Field, { label: t('runtime.flavor'), hint: t('runtime.flavorHint') },
+            h(Input, { value: draft.flavor ?? '', onChange: (value) => a.setDraft?.({ flavor: value }), placeholder: 'dev', size: 'sm' })),
+          h(Field, { label: t('runtime.program'), hint: t('runtime.programHint') },
+            h(Input, { value: draft.program ?? '', onChange: (value) => a.setDraft?.({ program: value }), placeholder: 'lib/main.dart', mono: true, size: 'sm' }))),
+        /* dart defines */
+        h(Field, { label: t('runtime.dartDefines') },
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+            defineRows.length === 0
+              ? h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, t('runtime.dartDefinesEmpty'))
+              : defineRows.map((row, index) => h('div', { key: index, style: { display: 'grid', gridTemplateColumns: '1fr 1fr 24px', gap: 4 } },
+                h(Input, {
+                  value: row.key,
+                  placeholder: t('runtime.defineKey'),
+                  size: 'sm',
+                  mono: true,
+                  onChange: (value) => commitDefines(defineRows.map((item, itemIndex) => (itemIndex === index ? { ...item, key: value } : item))),
+                }),
+                h(Input, {
+                  value: row.value,
+                  placeholder: t('runtime.defineValue'),
+                  size: 'sm',
+                  mono: true,
+                  onChange: (value) => commitDefines(defineRows.map((item, itemIndex) => (itemIndex === index ? { ...item, value } : item))),
+                }),
+                h(IconBtn, {
+                  icon: 'minus',
+                  size: 24,
+                  title: t('common.remove'),
+                  onClick: () => commitDefines(defineRows.filter((item, itemIndex) => itemIndex !== index)),
+                }))),
+            h('div', null,
+              h(Btn, {
+                size: 'sm',
+                icon: 'plus',
+                onClick: () => commitDefines([...defineRows, { key: '', value: '' }]),
+              }, t('runtime.addDefine'))))),
+        /* args */
+        h(Field, { label: t('runtime.args'), hint: t('runtime.argsHint') },
+          h(Input, { value: argsText, onChange: commitArgs, placeholder: '--verbose', mono: true })),
+
+        /* run configuration warnings */
+        (s.configWarnings ?? []).length === 0 ? null : h('div', {
+          style: {
+            display: 'flex', flexDirection: 'column', gap: 3, padding: '6px 8px',
+            borderRadius: T.radiusSm, border: `1px solid color-mix(in srgb, ${T.warn} 40%, transparent)`,
+            background: `color-mix(in srgb, ${T.warn} 10%, transparent)`, color: T.warnLabel, fontSize: T.fsXs,
+          },
+        },
+          h('div', { style: { fontWeight: 600 } }, t('runtime.warnings')),
+          (s.configWarnings ?? []).map((warning, index) => h('div', { key: index }, `· ${warning}`))),
+
+        h('div', { style: { fontSize: T.fsXs, color: T.textFaint, fontFamily: T.mono, wordBreak: 'break-all' } },
+          s.launchFile === null || s.launchFile === undefined
+            ? t('runtime.launchFileNone')
+            : t('runtime.launchFile', { path: s.launchFile })),
+
+        /* toolbar */
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', paddingTop: 2 } },
+          h(Btn, { kind: 'primary', icon: 'play', disabled: !canStart, onClick: onStart, title: t('runtime.start') },
+            pending === 'starting' ? t('runtime.starting') : t('runtime.start')),
+          h(Btn, { icon: 'stop', disabled: live !== true || busy === true, onClick: onStop }, t('runtime.stop')),
+          h(Btn, { icon: 'reload', disabled: displayPhase !== 'running', onClick: onReload }, t('runtime.reload')),
+          h(Btn, { icon: 'restart', disabled: displayPhase !== 'running', onClick: onRestart }, t('runtime.restart')),
+          pending === null ? null : h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, color: T.textDim, fontSize: T.fsXs } },
+            h(Spinner, { size: 11 }),
+            t(`phase.${pending}`, {}))))))
+
+  /* ---- right column: live run + recent --------------------------------- */
+  const detail = activeRun === null
+    ? h(Empty, {
+      icon: 'play',
+      title: t('run.noActiveTitle'),
+      body: t('run.noActiveBody'),
+      action: h(Btn, { kind: 'primary', icon: 'play', disabled: !canStart, onClick: onStart }, t('runtime.start')),
+    })
+    : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+      h(RunDetailRow, { label: t('run.phase') },
+        h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+          h(Pill, { tone: statusTone(displayPhase), dot: true }, t(`phase.${displayPhase}`, {})),
+          pending === null ? null : h(Spinner, { size: 11 }))),
+      h(RunDetailRow, { label: t('run.id'), mono: true }, activeRun.runId ?? t('common.notAvailable')),
+      h(RunDetailRow, { label: t('run.project') }, activeRun.projectPath ?? activeRun.projectId ?? t('common.notAvailable')),
+      h(RunDetailRow, { label: t('run.program'), mono: true }, activeRun.config?.program ?? draft.program ?? t('common.notAvailable')),
+      h(RunDetailRow, { label: t('run.device') }, activeRun.device === null || activeRun.device === undefined
+        ? t('shell.deviceMissing')
+        : `${activeRun.device.name ?? activeRun.device.id}${activeRun.device.platform === undefined ? '' : ` · ${activeRun.device.platform}`}`),
+      h(RunDetailRow, { label: t('runtime.mode') }, activeRun.config?.mode ?? t('common.notAvailable')),
+      h(RunDetailRow, { label: t('run.pid') }, activeRun.pid === null || activeRun.pid === undefined ? t('common.notAvailable') : String(activeRun.pid)),
+      h(RunDetailRow, { label: t('run.startedAt') }, formatTime(activeRun.startedAt, { date: true })),
+      h(RunDetailRow, { label: t('run.duration') }, formatDuration(Math.max(0, uptime))),
+      h(RunDetailRow, { label: t('run.exitCode') }, activeRun.exitCode === null || activeRun.exitCode === undefined
+        ? t('common.notAvailable')
+        : h('span', { style: { color: activeRun.exitCode === 0 ? T.ok : T.error } }, String(activeRun.exitCode))),
+      h(RunDetailRow, { label: t('run.hotReloads') }, t('run.count', { n: activeRun.hotReloads ?? 0 })),
+      h(RunDetailRow, { label: t('run.hotRestarts') }, t('run.count', { n: activeRun.hotRestarts ?? 0 })),
+      h(RunDetailRow, { label: t('run.appId') }, activeRun.appId ?? t('common.notAvailable')),
+      h(RunDetailRow, { label: t('run.vmService') },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' } },
+          h(Mono, { size: T.fsXs, dim: true, style: { flex: 1, minWidth: 120 } }, vmUri ?? t('shell.vmUriMissing')),
+          vmUri === null ? null : h(IconBtn, {
+            icon: 'copy',
+            title: t('shell.copyVmUri'),
+            onClick: async () => {
+              const ok = await copyText(vmUri)
+              a.toast?.(ok ? t('common.copied') : t('common.copyFailed'), ok ? 'ok' : 'error')
+            },
+          }),
+          devtoolsUrl === null ? null : h('a', {
+            href: devtoolsUrl,
+            target: '_blank',
+            rel: 'noreferrer noopener',
+            title: t('runtime.openDevtools'),
+            style: {
+              display: 'inline-flex', alignItems: 'center', gap: 4, height: 22, padding: '0 7px',
+              borderRadius: T.radiusSm, border: `1px solid ${T.border}`, color: T.text,
+              textDecoration: 'none', fontSize: T.fsXs,
+            },
+          }, h(Icon, { name: 'external', size: 11 }), t('shell.devtools')))),
+      activeRun.httpUri === null || activeRun.httpUri === undefined ? null : h(RunDetailRow, { label: t('run.httpUri'), mono: true }, activeRun.httpUri),
+      activeRun.error === null || activeRun.error === undefined ? null : h(RunDetailRow, { label: t('run.error') },
+        h('span', { style: { color: T.error, wordBreak: 'break-word' } }, activeRun.error)))
+
+  const right = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, padding: '12px 12px 12px 0', minWidth: 0 } },
+    h(Card, { title: t('run.active'), right: activeRun === null ? null : h(Pill, { tone: statusTone(displayPhase) }, t(`phase.${displayPhase}`, {})) }, detail),
+    h(Card, { title: t('run.recent'), subtitle: recentRuns.length === 0 ? t('runtime.recentEmpty') : undefined },
+      h(Table, {
+        dense: true,
+        maxHeight: 260,
+        rows: recentRuns,
+        rowKey: (row) => row.runId,
+        empty: h(Empty, { text: t('run.empty'), compact: true }),
+        columns: [
+          {
+            key: 'phase',
+            label: t('run.phase'),
+            width: 92,
+            render: (row) => h(Pill, { tone: statusTone(row.phase) }, t(`phase.${row.phase}`, {})),
+          },
+          { key: 'runId', label: t('run.id'), mono: true, width: 110 },
+          { key: 'projectPath', label: t('run.project'), dim: true, render: (row) => truncate(row.projectPath ?? row.projectId ?? '—', 34) },
+          { key: 'startedAt', label: t('run.startedAt'), width: 70, nowrap: true, render: (row) => formatTime(row.startedAt, { clock: true }) },
+          {
+            key: 'duration',
+            label: t('run.duration'),
+            width: 78,
+            nowrap: true,
+            render: (row) => formatDuration(Math.max(0, (row.finishedAt ?? now) - (row.startedAt ?? now))),
+          },
+          {
+            key: 'exitCode',
+            label: t('run.exitCode'),
+            width: 62,
+            nowrap: true,
+            render: (row) => (row.exitCode === null || row.exitCode === undefined
+              ? t('common.notAvailable')
+              : h('span', { style: { color: row.exitCode === 0 ? T.ok : T.error } }, String(row.exitCode))),
+          },
+        ],
+      })))
+
+  return h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', minHeight: 0 } },
+    h('div', { style: { flex: '0 1 420px', minWidth: 320, maxWidth: 460, minHeight: 0 } }, left),
+    h('div', { style: { flex: '1 1 480px', minWidth: 320, minHeight: 0 } }, right),
+    addOpen ? h(Modal, {
+      title: t('shell.addProjectTitle'),
+      onClose: () => setAddOpen(false),
+      width: 520,
+      footer: [
+        h(Btn, { key: 'cancel', onClick: () => setAddOpen(false) }, t('common.cancel')),
+        h(Btn, { key: 'add', kind: 'primary', disabled: addBusy, onClick: submitAddProject }, addBusy ? t('common.loading') : t('common.add')),
+      ],
+    },
+      h(Field, { label: t('runtime.project'), hint: t('shell.addProjectHint') },
+        h(Input, {
+          value: addPath,
+          onChange: setAddPath,
+          onEnter: submitAddProject,
+          placeholder: t('shell.addProjectPlaceholder'),
+          mono: true,
+          autoFocus: true,
+        }))) : null)
 }
 
     /* ==== 30-logs.js ==== */
 /* ====================================================================== *
  * 30-logs.js — owner: dev-ui-core
- * LogsPage: console, level/source filters, search, follow mode, jump-to-code.
- * PLACEHOLDER: replace with the real implementation per docs/CONTRACTS.md §8.2.
+ *
+ * LogsPage: a real console over the host's log ring buffer.
+ *
+ *  - incremental fetch with the `since` cursor (append + dedupe by seq);
+ *  - follow mode with auto-scroll and a "N new lines" jump button;
+ *  - level chips, source chips, a run filter and a debounced regex search
+ *    (invalid regex is reported instead of silently ignored);
+ *  - ANSI-free monospace rows with a level colour, click to expand metadata
+ *    and stack frames, "jump to source" through actions.openFile;
+ *  - row virtualization (fixed offsets, absolute rows) so 4000 buffered lines
+ *    stay smooth, and it grows correctly when a row is expanded;
+ *  - copy all / export .log / clear view and honest empty states.
  * ====================================================================== */
 
-function LogsPage({ state }) {
-  return h(PageStub, { name: t('nav.logs') })
+/** Client-side mirror cap — host capacity is settings.logCapacity (default 4000). */
+const LOG_BUFFER_LIMIT = 4000
+/** Page size for one fetch window. */
+const LOG_PAGE_LIMIT = 500
+/** Follow-mode poll cadence. */
+const LOG_POLL_MS = 1000
+/** Collapsed row height (px) — must match the rendered row. */
+const LOG_ROW_HEIGHT = 22
+
+/**
+ * Fetch one log window, preferring the shared action so other pages see the
+ * same totals, and falling back to a direct request if the action is missing.
+ */
+async function loadLogWindow(actions, query) {
+  if (actions !== null && actions !== undefined && typeof actions.fetchLogs === 'function') {
+    return actions.fetchLogs(query)
+  }
+  const data = await api('/logs', { query })
+  return {
+    entries: Array.isArray(data.entries) ? data.entries : [],
+    nextCursor: Number(data.nextCursor ?? 0),
+    total: Number(data.total ?? 0),
+    dropped: Number(data.dropped ?? 0),
+  }
+}
+
+/**
+ * Extract `{ file, line, column, symbol }` frames from a log entry:
+ * explicit `meta.frames`, a `meta.stack` string, or `file.dart:line:col`
+ * patterns inside the text.
+ */
+function extractFrames(entry) {
+  const frames = []
+  const push = (file, line, column, symbol) => {
+    if (file === undefined || file === null || file === '') return
+    frames.push({
+      file: String(file),
+      line: line === undefined || line === null || Number.isNaN(Number(line)) ? null : Number(line),
+      column: column === undefined || column === null || Number.isNaN(Number(column)) ? null : Number(column),
+      symbol: symbol === undefined || symbol === null || symbol === '' ? null : String(symbol),
+    })
+  }
+  const meta = entry?.meta
+  if (meta !== null && typeof meta === 'object') {
+    if (Array.isArray(meta.frames)) {
+      for (const frame of meta.frames) push(frame?.file, frame?.line, frame?.column, frame?.symbol)
+    } else if (typeof meta.stack === 'string') {
+      for (const line of meta.stack.split('\n')) {
+        const match = line.match(/((?:[A-Za-z]:)?[^\s():]+\.dart):(\d+)(?::(\d+))?/)
+        if (match !== null) push(match[1], match[2], match[3], line.trim())
+      }
+    }
+  }
+  if (frames.length === 0 && typeof entry?.text === 'string') {
+    for (const line of entry.text.split('\n')) {
+      const match = line.match(/((?:[A-Za-z]:)?[^\s():]+\.dart):(\d+)(?::(\d+))?/)
+      if (match !== null) push(match[1], match[2], match[3], null)
+      if (frames.length >= 12) break
+    }
+  }
+  return frames.slice(0, 24)
+}
+
+/** Estimated height of an expanded row (metadata + frames, clamped). */
+function expandedRowHeight(entry) {
+  const meta = entry?.meta
+  let metaLines = 0
+  if (meta !== null && meta !== undefined) {
+    try {
+      metaLines = JSON.stringify(meta, null, 2).split('\n').length
+    } catch {
+      metaLines = 1
+    }
+  }
+  const frames = extractFrames(entry).length
+  const metaHeight = meta === null || meta === undefined ? 0 : Math.min(180, metaLines * 16 + 10)
+  const framesHeight = frames === 0 ? 0 : Math.min(180, frames * 17 + 20)
+  return LOG_ROW_HEIGHT + 6 + metaHeight + framesHeight
+}
+
+/** Build a highlight regex from the search box; null when empty/invalid. */
+function buildHighlightPattern(text) {
+  const value = String(text ?? '')
+  if (value.trim() === '') return { regex: null, error: null }
+  try {
+    return { regex: new RegExp(value, 'gi'), error: null }
+  } catch (error) {
+    return { regex: null, error: error?.message ?? String(error) }
+  }
+}
+
+/** Split text into nodes, wrapping matches of `regex`. */
+function highlightText(text, regex) {
+  const value = String(text ?? '')
+  if (regex === null) return value
+  const parts = []
+  let lastIndex = 0
+  regex.lastIndex = 0
+  let match = regex.exec(value)
+  let guard = 0
+  while (match !== null && guard < 200) {
+    guard += 1
+    if (match.index > lastIndex) parts.push(value.slice(lastIndex, match.index))
+    parts.push(h('mark', {
+      key: `m${guard}-${match.index}`,
+      style: {
+        background: `color-mix(in srgb, ${T.warn} 40%, transparent)`,
+        color: 'inherit',
+        borderRadius: 2,
+        padding: '0 1px',
+      },
+    }, match[0]))
+    lastIndex = match.index + match[0].length
+    if (match[0] === '') break
+    match = regex.exec(value)
+  }
+  if (lastIndex < value.length) parts.push(value.slice(lastIndex))
+  return parts.length === 0 ? value : parts
+}
+
+/** Binary search: index of the last offset <= target. */
+function findRowIndex(offsets, target) {
+  let low = 0
+  let high = offsets.length - 1
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2)
+    if (offsets[mid] <= target) low = mid
+    else high = mid - 1
+  }
+  return low
+}
+
+/** One console row (collapsed line + expansion). */
+function LogRow({ entry, top, height, expanded, onToggle, onOpenFile, regex }) {
+  const [hover, bind] = useHover()
+  const tone = levelTone(entry.level)
+  const colors = toneColors(tone)
+  const time = formatTime(entry.at, { ms: true })
+  const text = stripAnsi(entry.text)
+  const frames = expanded === true ? extractFrames(entry) : []
+  const hasMeta = entry.meta !== null && entry.meta !== undefined
+  const expandable = hasMeta || frames.length > 0
+  return h('div', {
+    style: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      top,
+      height,
+      display: 'flex',
+      flexDirection: 'column',
+      borderBottom: `1px solid ${T.border}`,
+      background: hover && expandable ? T.hover : 'transparent',
+      overflow: 'hidden',
+    },
+    ...bind,
+  },
+    h('div', {
+      role: expandable ? 'button' : undefined,
+      onClick: expandable ? onToggle : undefined,
+      title: expandable ? (expanded === true ? t('logs.collapseHint') : t('logs.expandHint')) : undefined,
+      style: {
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 8,
+        height: LOG_ROW_HEIGHT,
+        padding: '0 8px',
+        cursor: expandable ? 'pointer' : 'default',
+        fontSize: T.fsSm,
+        lineHeight: `${LOG_ROW_HEIGHT}px`,
+        minWidth: 0,
+      },
+    },
+      h('span', { style: { width: 84, flex: 'none', color: T.textFaint, fontFamily: T.mono, fontSize: T.fsXs } }, time),
+      h('span', {
+        style: {
+          width: 42, flex: 'none', textAlign: 'center', borderRadius: 3, height: 15, lineHeight: '15px',
+          marginTop: 3, background: colors.bg, color: colors.fg, fontSize: 10, fontWeight: 700,
+          textTransform: 'uppercase', letterSpacing: 0.3,
+        },
+      }, entry.level ?? 'info'),
+      h('span', {
+        style: {
+          width: 62, flex: 'none', color: T.textDim, fontFamily: T.mono, fontSize: T.fsXs,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        },
+        title: entry.source,
+      }, entry.source ?? ''),
+      h('span', {
+        style: {
+          flex: 1, minWidth: 0, fontFamily: T.mono, fontSize: T.fsSm, color: tone === 'error' ? T.error : tone === 'warn' ? T.warnLabel : T.text,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        },
+        title: truncate(text, 400),
+      }, highlightText(text, regex)),
+      expandable ? h(Icon, { name: expanded === true ? 'chevronDown' : 'chevronRight', size: 11, color: T.textFaint, style: { marginTop: 5 } }) : null),
+
+    expanded === true
+      ? h('div', {
+        style: {
+          padding: '2px 8px 6px 92px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+          overflow: 'hidden',
+          flex: 1,
+          minHeight: 0,
+        },
+      },
+        frames.length === 0 ? null : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 1 } },
+          h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, t('logs.frames')),
+          frames.map((frame, index) => h('div', { key: index, style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+            h(Mono, { size: T.fsXs, style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              `${frame.file}${frame.line === null ? '' : `:${frame.line}`}${frame.column === null ? '' : `:${frame.column}`}${frame.symbol === null ? '' : `  ${truncate(frame.symbol, 90)}`}`),
+            h(Btn, {
+              size: 'sm',
+              icon: 'code',
+              onClick: (event) => {
+                if (event !== undefined && event.stopPropagation !== undefined) event.stopPropagation()
+                onOpenFile(frame.file, frame.line)
+              },
+            }, t('logs.openSource'))))),
+        hasMeta
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+            h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, t('logs.meta')),
+            h('pre', {
+              className: 'fwb-scroll',
+              style: {
+                margin: 0,
+                padding: '4px 6px',
+                maxHeight: 150,
+                overflow: 'auto',
+                borderRadius: T.radiusSm,
+                border: `1px solid ${T.border}`,
+                background: T.code,
+                color: T.textDim,
+                fontFamily: T.mono,
+                fontSize: T.fsXs,
+                lineHeight: '15px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              },
+            }, safeJson(entry.meta)))
+          : null)
+      : null)
+}
+
+/** Stable pretty JSON for metadata (never throws). */
+function safeJson(value) {
+  try {
+    const text = JSON.stringify(value, null, 2)
+    return text === undefined ? String(value) : text
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * Log console page.
+ * @param {{state: object, actions: object}} props page props from the shell.
+ * @returns {any} page element.
+ */
+function LogsPage({ state: sharedState, actions: sharedActions }) {
+  ensureStyles()
+  const s = sharedState ?? {}
+  const a = sharedActions ?? s.actions ?? {}
+  const activeRunId = s.activeRunId ?? null
+
+  const [entries, setEntries] = React.useState(() => (Array.isArray(s.logs?.entries) ? s.logs.entries : []))
+  const [total, setTotal] = React.useState(Number(s.logs?.total ?? 0))
+  const [dropped, setDropped] = React.useState(Number(s.logs?.dropped ?? 0))
+  const [cursor, setCursor] = React.useState(Number(s.logs?.nextCursor ?? 0))
+  const [follow, setFollow] = React.useState(true)
+  const [levelList, setLevelList] = React.useState([])
+  const [sourceList, setSourceList] = React.useState([])
+  const [search, setSearch] = React.useState('')
+  const [pattern, setPattern] = React.useState('')
+  const [runOnly, setRunOnly] = React.useState(false)
+  const [expanded, setExpanded] = React.useState({})
+  const [newCount, setNewCount] = React.useState(0)
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState(null)
+  const [scrollTop, setScrollTop] = React.useState(0)
+  const [viewport, setViewport] = React.useState(520)
+  const [atBottom, setAtBottom] = React.useState(true)
+
+  const listRef = React.useRef(null)
+  const cursorRef = React.useRef(cursor)
+  const entriesRef = React.useRef(entries)
+  cursorRef.current = cursor
+  entriesRef.current = entries
+
+  /* Actions/state live in refs so fetch callbacks stay identity-stable. */
+  const liveRef = React.useRef({ actions: a, runId: activeRunId })
+  liveRef.current = { actions: a, runId: activeRunId }
+
+  const query = React.useMemo(() => {
+    const next = { limit: LOG_PAGE_LIMIT }
+    if (levelList.length > 0) next.levels = levelList
+    if (sourceList.length > 0) next.sources = sourceList
+    if (pattern !== '') next.pattern = pattern
+    if (runOnly === true) {
+      const runId = liveRef.current.runId
+      if (runId !== null && runId !== undefined) next.runId = runId
+    }
+    return next
+  }, [levelList, sourceList, pattern, runOnly, activeRunId])
+
+  const queryRef = React.useRef(query)
+  queryRef.current = query
+
+  const highlight = React.useMemo(() => buildHighlightPattern(pattern), [pattern])
+  const regex = highlight.regex
+
+  /* Debounce the search box into the server-side `pattern`. */
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => setPattern(search.trim()), 260)
+    return () => window.clearTimeout(timer)
+  }, [search])
+
+  /** Full reload: newest matching window from since=0. */
+  const reload = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      const payload = await loadLogWindow(liveRef.current.actions, { ...queryRef.current, since: 0 })
+      setEntries(payload.entries.slice(-LOG_BUFFER_LIMIT))
+      setTotal(Number(payload.total ?? 0))
+      setDropped(Number(payload.dropped ?? 0))
+      setCursor(Number(payload.nextCursor ?? 0))
+      cursorRef.current = Number(payload.nextCursor ?? 0)
+      setNewCount(0)
+      setError(null)
+    } catch (issue) {
+      setError(issue ?? new Error(t('state.offline')))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  /** Incremental pull: only entries newer than the cursor. */
+  const pull = React.useCallback(async () => {
+    try {
+      const since = Number(cursorRef.current) || 0
+      const payload = await loadLogWindow(liveRef.current.actions, { ...queryRef.current, since })
+      if (payload.entries.length > 0) {
+        const known = new Set(entriesRef.current.map((entry) => entry.seq))
+        const fresh = payload.entries.filter((entry) => known.has(entry.seq) !== true)
+        if (fresh.length > 0) {
+          setEntries((previous) => {
+            const merged = [...previous, ...fresh]
+            return merged.length > LOG_BUFFER_LIMIT ? merged.slice(merged.length - LOG_BUFFER_LIMIT) : merged
+          })
+          if (follow !== true) setNewCount((count) => count + fresh.length)
+        }
+      }
+      setTotal(Number(payload.total ?? 0))
+      setDropped(Number(payload.dropped ?? 0))
+      if (payload.nextCursor > 0) {
+        setCursor(Number(payload.nextCursor))
+        cursorRef.current = Number(payload.nextCursor)
+      }
+      setError(null)
+    } catch (issue) {
+      setError(issue ?? new Error(t('state.offline')))
+    } finally {
+      setLoading(false)
+    }
+  }, [follow])
+
+  /* Reload whenever the server-side filter set changes. */
+  React.useEffect(() => { void reload() }, [query, reload])
+
+  /* Follow polling. */
+  React.useEffect(() => {
+    if (follow !== true) return undefined
+    const timer = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      void pull()
+    }, LOG_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [follow, pull])
+
+  /* The shell's `R` hint asks the console for a full reload. */
+  React.useEffect(() => {
+    const onRefresh = () => { void reload() }
+    window.addEventListener('fwb:logs-refresh', onRefresh)
+    return () => window.removeEventListener('fwb:logs-refresh', onRefresh)
+  }, [reload])
+
+  /* Measure the scroll viewport once mounted and on resize. */
+  React.useEffect(() => {
+    const node = listRef.current
+    if (node === null || node === undefined) return undefined
+    const measure = () => setViewport(node.clientHeight || 520)
+    measure()
+    let observer = null
+    if (typeof ResizeObserver === 'function') {
+      observer = new ResizeObserver(measure)
+      observer.observe(node)
+    } else {
+      window.addEventListener('resize', measure)
+    }
+    return () => {
+      if (observer !== null) observer.disconnect()
+      else window.removeEventListener('resize', measure)
+    }
+  }, [])
+
+  /* Keep the newest line visible while following. */
+  React.useEffect(() => {
+    if (follow !== true) return
+    const node = listRef.current
+    if (node === null || node === undefined) return
+    node.scrollTop = node.scrollHeight
+    setScrollTop(node.scrollTop)
+    setAtBottom(true)
+  }, [entries.length, follow])
+
+  const toggleInList = (list, value, setList) => {
+    setList(list.includes(value) ? list.filter((item) => item !== value) : [...list, value])
+  }
+
+  const toggleRow = (seq) => {
+    setExpanded((previous) => ({ ...previous, [seq]: previous[seq] !== true }))
+  }
+
+  const openFile = (file, line) => {
+    const action = liveRef.current.actions
+    if (typeof action.openFile === 'function') {
+      void action.openFile(file, line)
+      return
+    }
+    void copyText(`${file}${line === null || line === undefined ? '' : `:${line}`}`)
+    action.toast?.(t('logs.openFailed', { message: t('common.copyFailed') }), 'error')
+  }
+
+  const consoleText = React.useCallback(() => entriesRef.current.map((entry) => {
+    const stamp = formatTime(entry.at, { ms: true })
+    return `${stamp} ${String(entry.level ?? 'info').toUpperCase().padEnd(5)} ${String(entry.source ?? '').padEnd(9)} ${stripAnsi(entry.text)}`
+  }).join('\n'), [])
+
+  const copyAll = async () => {
+    const text = consoleText()
+    const ok = await copyText(text)
+    a.toast?.(ok ? t('logs.copyAllDone', { n: entriesRef.current.length }) : t('common.copyFailed'), ok ? 'ok' : 'error')
+  }
+
+  const exportAll = () => {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const name = downloadText(`flutter-workbench-${stamp}.log`, consoleText())
+    a.toast?.(t('logs.exported', { name }), 'ok')
+  }
+
+  const clearView = () => {
+    setEntries([])
+    entriesRef.current = []
+    setExpanded({})
+    setNewCount(0)
+    a.toast?.(t('logs.cleared'), 'ok')
+  }
+
+  const markLog = async () => {
+    if (typeof a.markLog !== 'function') return
+    const text = typeof window.prompt === 'function' ? window.prompt(t('logs.markPrompt'), '') : ''
+    if (text === null || text === undefined) return
+    try {
+      await a.markLog(text)
+      a.toast?.(t('logs.marked'), 'ok')
+      await pull()
+    } catch (issue) {
+      a.toast?.(t('common.actionFailed', { message: issue?.message ?? String(issue) }), 'error')
+    }
+  }
+
+  const jumpToBottom = () => {
+    const node = listRef.current
+    if (node !== null && node !== undefined) {
+      node.scrollTop = node.scrollHeight
+      setScrollTop(node.scrollTop)
+    }
+    setFollow(true)
+    setNewCount(0)
+  }
+
+  /* ---- virtualization ------------------------------------------------- */
+
+  const rowHeights = React.useMemo(() => entries.map((entry) => (
+    expanded[entry.seq] === true ? expandedRowHeight(entry) : LOG_ROW_HEIGHT
+  )), [entries, expanded])
+
+  const offsets = React.useMemo(() => {
+    const list = new Array(rowHeights.length + 1)
+    list[0] = 0
+    for (let index = 0; index < rowHeights.length; index += 1) list[index + 1] = list[index] + rowHeights[index]
+    return list
+  }, [rowHeights])
+
+  const visible = React.useMemo(() => {
+    if (entries.length === 0) return { start: 0, end: 0 }
+    const start = Math.max(0, findRowIndex(offsets, Math.max(0, scrollTop)) - 1)
+    const end = Math.min(entries.length, findRowIndex(offsets, scrollTop + viewport + 1) + 2)
+    return { start, end }
+  }, [entries.length, offsets, scrollTop, viewport])
+
+  const filtersActive = levelList.length > 0 || sourceList.length > 0 || pattern !== '' || runOnly === true
+
+  const resetFilters = () => {
+    setLevelList([])
+    setSourceList([])
+    setSearch('')
+    setPattern('')
+    setRunOnly(false)
+  }
+
+  const onListScroll = (event) => {
+    const node = event.currentTarget
+    setScrollTop(node.scrollTop)
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight
+    const bottom = gap < 24
+    setAtBottom(bottom)
+    if (bottom !== true && follow === true) setFollow(false)
+  }
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, minWidth: 0 } },
+    /* ---- toolbar ---------------------------------------------------- */
+    h('div', {
+      style: {
+        display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 12px',
+        borderBottom: `1px solid ${T.border}`, flexShrink: 0, background: T.l1,
+      },
+    },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+        h('div', { style: { flex: '1 1 220px', minWidth: 180 } },
+          h(Input, {
+            value: search,
+            onChange: setSearch,
+            placeholder: t('logs.searchPlaceholder'),
+            mono: true,
+            invalid: highlight.error !== null,
+            size: 'sm',
+          })),
+        h(Chip, {
+          active: follow,
+          onClick: () => { if (follow !== true) jumpToBottom(); else setFollow(false) },
+          title: follow === true ? t('logs.followOn') : t('logs.followPaused'),
+        }, h(Icon, { name: follow === true ? 'pause' : 'play', size: 11 }), t('logs.follow')),
+        h(Chip, {
+          active: runOnly,
+          onClick: () => setRunOnly((value) => value !== true),
+          disabled: activeRunId === null || activeRunId === undefined,
+          title: t('logs.currentRunOnly'),
+        }, t('logs.currentRunOnly')),
+        h('div', { style: { flex: 1 } }),
+        h(IconBtn, { icon: 'refresh', title: t('common.refresh'), onClick: () => { void reload() } }),
+        h(IconBtn, { icon: 'spark', title: t('logs.mark'), onClick: () => { void markLog() } }),
+        h(IconBtn, { icon: 'copy', title: t('logs.copyAll'), onClick: () => { void copyAll() } }),
+        h(IconBtn, { icon: 'download', title: t('logs.export'), onClick: exportAll }),
+        h(IconBtn, { icon: 'trash', title: t('logs.clear'), onClick: clearView })),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', rowGap: 4 } },
+        h('span', { style: { fontSize: T.fsXs, color: T.textFaint } }, t('logs.levels')),
+        LEVELS.map((level) => h(Chip, {
+          key: level,
+          active: levelList.includes(level),
+          onClick: () => toggleInList(levelList, level, setLevelList),
+          title: level,
+        }, level)),
+        h('span', { style: { width: 1, height: 16, background: T.border } }),
+        h('span', { style: { fontSize: T.fsXs, color: T.textFaint } }, t('logs.sources')),
+        SOURCES.map((source) => h(Chip, {
+          key: source,
+          active: sourceList.includes(source),
+          onClick: () => toggleInList(sourceList, source, setSourceList),
+        }, source)),
+        filtersActive ? h(Btn, { size: 'sm', kind: 'text', onClick: resetFilters }, t('logs.resetFilters')) : null),
+      highlight.error === null ? null : h('div', { style: { fontSize: T.fsXs, color: T.error } }, t('logs.regexInvalid', { message: highlight.error })),
+      error === null ? null : h('div', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: 8, fontSize: T.fsXs, color: T.error,
+          padding: '4px 6px', borderRadius: T.radiusSm,
+          background: `color-mix(in srgb, ${T.error} 10%, transparent)`,
+        },
+      },
+        h(Icon, { name: 'warn', size: 12 }),
+        h('span', { style: { flex: 1, minWidth: 0 } }, error.message ?? String(error)),
+        h(Btn, { size: 'sm', onClick: () => { void reload() } }, t('common.retry')))),
+
+    /* ---- console ---------------------------------------------------- */
+    h('div', { style: { position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+      entries.length === 0
+        ? h('div', { style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+          loading === true
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, color: T.textDim } }, h(Spinner, null), t('common.loading'))
+            : h(Empty, {
+              icon: 'logs',
+              title: filtersActive ? t('logs.noMatch') : t('logs.emptyTitle'),
+              body: t('logs.emptyBody'),
+              action: filtersActive ? h(Btn, { size: 'sm', onClick: resetFilters }, t('logs.resetFilters')) : null,
+            }))
+        : h('div', {
+            ref: listRef,
+            className: 'fwb-scroll',
+            onScroll: onListScroll,
+            style: { flex: 1, minHeight: 0, overflow: 'auto', position: 'relative', fontFamily: T.mono },
+          },
+          h('div', { style: { position: 'relative', height: offsets[offsets.length - 1] } },
+            entries.slice(visible.start, visible.end).map((entry, index) => {
+              const rowIndex = visible.start + index
+              return h(LogRow, {
+                key: entry.seq,
+                entry,
+                top: offsets[rowIndex],
+                height: rowHeights[rowIndex],
+                expanded: expanded[entry.seq] === true,
+                onToggle: () => toggleRow(entry.seq),
+                onOpenFile: openFile,
+                regex,
+              })
+            }))),
+
+      /* new-lines pill while scrolled up */
+      newCount > 0 && follow !== true
+        ? h('button', {
+          type: 'button',
+          onClick: jumpToBottom,
+          style: {
+            position: 'absolute', left: '50%', transform: 'translateX(-50%)', bottom: 10,
+            display: 'inline-flex', alignItems: 'center', gap: 5, height: 24, padding: '0 10px',
+            borderRadius: 12, border: `1px solid ${T.borderStrong}`, background: T.bgRaised,
+            color: T.text, fontSize: T.fsXs, cursor: 'pointer', boxShadow: T.shadow,
+          },
+        },
+          h(Icon, { name: 'arrowDown', size: 11 }),
+          t('logs.newLines', { n: newCount }))
+        : null),
+
+    /* ---- status strip ----------------------------------------------- */
+    h('div', {
+      style: {
+        display: 'flex', alignItems: 'center', gap: 10, padding: '3px 12px',
+        borderTop: `1px solid ${T.border}`, color: T.textFaint, fontSize: T.fsXs,
+        flexShrink: 0, flexWrap: 'wrap', background: T.l1,
+      },
+    },
+      h('span', null, t('logs.showing', { shown: entries.length, total })),
+      dropped > 0 ? h('span', { style: { color: T.warnLabel } }, t('logs.truncated', { n: LOG_BUFFER_LIMIT })) : null,
+      entries.length > LOG_PAGE_LIMIT ? h('span', null, t('logs.virtualized', { n: entries.length })) : null,
+      filtersActive ? h('span', { style: { color: T.brand } }, t('logs.filtersActive')) : null,
+      atBottom !== true && follow !== true ? h('span', { style: { color: T.warnLabel } }, t('logs.followPaused')) : null,
+      h('span', { style: { flex: 1 } }),
+      h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 4 } }, h(Kbd, null, 'R'), t('logs.follow'))))
 }
 
     /* ==== 40-network.js ==== */
 /* ====================================================================== *
  * 40-network.js — owner: dev-ui-data
- * NetworkPage: HTTP request list + detail drawer.
- * PLACEHOLDER: replace with the real implementation per docs/CONTRACTS.md §8.2.
+ *
+ * NetworkPage: HTTP request inspector fed by the VM Service HTTP profile.
+ *   toolbar: status chips (2xx/3xx/4xx/5xx/error) + method filter + search +
+ *            pause/clear/export
+ *   list:    virtualised rows (status tone, method, shortened path, duration)
+ *   drawer:  POST /network/detail — request/response headers and bodies with an
+ *            explicit truncation notice, per-section copy and "copy as cURL"
+ *
+ * This file also owns the small set of helpers every dev-ui-data page reuses
+ * (formatting, clipboard, download, notices, locale extension). Every helper is
+ * prefixed `fwb…`/`useFwb…` because all fragments share one function scope with
+ * the prelude and the other pages.
+ *
+ * Kit surface consumed (docs/CONTRACTS.md §8.1): Btn, IconBtn, Pill, Chip, Card,
+ * Field, Input, TextArea, Select, Checkbox, Modal, Empty, Spinner, Mono, t.
  * ====================================================================== */
 
-function NetworkPage({ state }) {
-  return h(PageStub, { name: t('nav.network') })
+/* ---------------------------------------------------------------- helpers -- */
+
+/** Pages receive `{ state }`; actions may be nested or handed down separately. */
+function fwbActions(state, actions) {
+  const fromState = state !== null && typeof state === 'object' ? state.actions : null
+  if (fromState !== null && typeof fromState === 'object') return fromState
+  return actions !== null && typeof actions === 'object' ? actions : {}
 }
+
+/**
+ * Prefer a shared client action; fall back to the documented HTTP route when the
+ * action is missing. Errors from an existing action always propagate — a
+ * rejected mutation must never be retried through a second transport.
+ */
+async function fwbInvoke(act, name, args, fallback) {
+  const fn = act !== null && act !== undefined ? act[name] : undefined
+  if (typeof fn === 'function') return fn(...args)
+  if (typeof fallback === 'function') return fallback()
+  throw Object.assign(new Error(`client action not available: ${name}`), { code: 'action-missing' })
+}
+
+/** Accept either a DOM change event or the raw value from a kit control. */
+function fwbReadValue(next) {
+  if (next === null || next === undefined) return next
+  if (typeof next === 'object') {
+    if (next.target !== undefined && next.target !== null) {
+      if (next.target.type === 'checkbox') return next.target.checked === true
+      return next.target.value
+    }
+    if (next.currentTarget !== undefined && next.currentTarget !== null) return next.currentTarget.value
+    if (next.value !== undefined) return next.value
+  }
+  return next
+}
+
+/** Split a textarea/JSON list field into trimmed non-empty lines. */
+function fwbLines(text) {
+  return String(text ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+}
+
+function fwbBytes(count) {
+  const value = Number(count)
+  if (Number.isFinite(value) === false || value < 0) return '—'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function fwbDuration(ms) {
+  const value = Number(ms)
+  if (Number.isFinite(value) === false) return '—'
+  if (value < 1) return `${Math.round(value * 1000)}µs`
+  if (value < 1000) return `${Math.round(value)}ms`
+  return `${(value / 1000).toFixed(value < 10000 ? 2 : 1)}s`
+}
+
+function fwbPad2(value) {
+  return String(value).padStart(2, '0')
+}
+
+/** HH:MM:SS in local time; empty for a missing timestamp. */
+function fwbClock(stamp) {
+  const value = Number(stamp)
+  if (Number.isFinite(value) === false || value <= 0) return '—'
+  const date = new Date(value)
+  return `${fwbPad2(date.getHours())}:${fwbPad2(date.getMinutes())}:${fwbPad2(date.getSeconds())}`
+}
+
+/** "12s ago" / "3m ago" style relative label for timelines. */
+function fwbAgo(stamp) {
+  const value = Number(stamp)
+  if (Number.isFinite(value) === false || value <= 0) return '—'
+  const delta = Math.max(0, Date.now() - value)
+  if (delta < 5000) return t('time.justNow')
+  const seconds = Math.round(delta / 1000)
+  if (seconds < 60) return t('time.secondsAgo', { n: seconds })
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return t('time.minutesAgo', { n: minutes })
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return t('time.hoursAgo', { n: hours })
+  return t('time.daysAgo', { n: Math.round(hours / 24) })
+}
+
+/** Clipboard write with a document.execCommand fallback for non-secure hosts. */
+async function fwbCopy(text) {
+  const value = String(text ?? '')
+  if (value === '') return false
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard !== undefined && navigator.clipboard !== null) {
+      await navigator.clipboard.writeText(value)
+      return true
+    }
+  } catch (error) {
+    /* fall through to the textarea trick */
+  }
+  try {
+    const node = document.createElement('textarea')
+    node.value = value
+    node.setAttribute('readonly', 'readonly')
+    node.style.position = 'fixed'
+    node.style.top = '-1000px'
+    node.style.opacity = '0'
+    document.body.appendChild(node)
+    node.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(node)
+    return ok === true
+  } catch (error) {
+    return false
+  }
+}
+
+/** Download a generated blob (export buttons); no host endpoint required. */
+function fwbDownload(filename, text, mime) {
+  try {
+    const blob = new Blob([String(text ?? '')], { type: String(mime ?? 'text/plain;charset=utf-8') })
+    const href = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = href
+    link.download = filename
+    link.style.display = 'none'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    setTimeout(() => URL.revokeObjectURL(href), 2000)
+    return true
+  } catch (error) {
+    return false
+  }
+}
+
+/**
+ * Notice channel: prefers the shared `actions.toast(message, tone)`; when the
+ * shell does not provide one the page keeps its own banner so no feedback is
+ * silently lost.
+ */
+function useFwbNotify(state, actions) {
+  const [notice, setNotice] = React.useState(null)
+  const act = fwbActions(state, actions)
+  const push = React.useCallback((message, tone) => {
+    const text = String(message ?? '')
+    if (text === '') return
+    if (typeof act.toast === 'function') {
+      act.toast(text, tone ?? 'info')
+      return
+    }
+    setNotice({ message: text, tone: tone ?? 'info', at: Date.now() })
+  }, [act])
+  const clear = React.useCallback(() => setNotice(null), [])
+
+  React.useEffect(() => {
+    if (notice === null) return undefined
+    const timer = setTimeout(() => setNotice(null), 6000)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  return { notice, push, clear }
+}
+
+function fwbToneColor(tone) {
+  if (tone === 'ok') return T.ok
+  if (tone === 'warn') return T.warn
+  if (tone === 'error') return T.error
+  if (tone === 'info') return T.brand
+  return T.textDim
+}
+
+/** Small inline banner used when the shell has no toast host. */
+function FwbNotice({ notice, onDismiss }) {
+  if (notice === null || notice === undefined) return null
+  const color = fwbToneColor(notice.tone)
+  return h('div', {
+    role: 'status',
+    style: {
+      display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', margin: '6px 8px',
+      border: `1px solid ${color}`, borderRadius: T.radiusSm, color, fontSize: 12,
+      background: T.bgRaised,
+    },
+  },
+    h('span', { style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere' } }, notice.message),
+    h(Btn, { onClick: onDismiss, title: t('net.close') }, '✕'))
+}
+
+/** Copy button that reports its own state without needing a toast host. */
+function FwbCopyBtn({ value, label, notify, kind, disabled }) {
+  const [state, setState] = React.useState('idle')
+  React.useEffect(() => {
+    if (state === 'idle') return undefined
+    const timer = setTimeout(() => setState('idle'), 1600)
+    return () => clearTimeout(timer)
+  }, [state])
+
+  const onClick = async () => {
+    const ok = await fwbCopy(value)
+    setState(ok ? 'done' : 'failed')
+    if (typeof notify === 'function') notify(ok ? t('net.copied') : t('net.copyFailed'), ok ? 'ok' : 'error')
+  }
+
+  const text = state === 'done' ? t('net.copied') : state === 'failed' ? t('net.copyFailed') : (label ?? t('net.copy'))
+  return h(Btn, { onClick, kind: kind ?? 'ghost', title: t('net.copy'), disabled: disabled === true, style: { padding: '3px 8px', fontSize: 11 } }, text)
+}
+
+/** Top-level page scaffold shared by the three data pages. */
+function FwbPage({ children, notice, onDismiss, gap }) {
+  return h('div', {
+    style: {
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+      color: T.text, fontSize: T.fs, fontFamily: T.font, gap: gap ?? 0,
+    },
+  },
+    h(FwbNotice, { notice, onDismiss }),
+    children)
+}
+
+/** Label/value grid used by the network drawer and the settings/quality panes. */
+function FwbKeyValues({ entries, mono }) {
+  const rows = entries === null || entries === undefined ? [] : entries
+  if (rows.length === 0) return h('div', { style: { color: T.textFaint, fontSize: 12, padding: '4px 0' } }, t('net.noHeaders'))
+  return h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(110px, 32%) 1fr', gap: '2px 10px', fontSize: 12 } },
+    rows.map((row, index) => h(React.Fragment, { key: `${row[0]}-${index}` },
+      h('div', { style: { color: T.textFaint, overflowWrap: 'anywhere' } }, String(row[0])),
+      h('div', { style: { color: T.text, overflowWrap: 'anywhere', fontFamily: mono === false ? T.font : T.mono } }, String(row[1])))))
+}
+
+/** Pretty-print a body value; objects become indented JSON. */
+function fwbBodyText(body) {
+  if (body === null || body === undefined) return ''
+  if (typeof body === 'string') return body
+  try {
+    return JSON.stringify(body, null, 2)
+  } catch (error) {
+    return String(body)
+  }
+}
+
+/** Header object → ordered [name, value] pairs. */
+function fwbHeaderRows(headers) {
+  if (headers === null || headers === undefined || typeof headers !== 'object') return []
+  return Object.keys(headers).map((name) => [name, Array.isArray(headers[name]) ? headers[name].join(', ') : headers[name]])
+}
+
+/* -------------------------------------------------------------- locale -- */
+
+/**
+ * Extend the shared dictionaries without touching 00-prelude.js (not ours).
+ * 90-apply registers the same ZH/EN objects with the locale service, so the keys
+ * must be present before apply runs — fragment top-level code is early enough.
+ */
+function fwbExtendLocale(zh, en) {
+  try {
+    if (typeof ZH === 'object' && ZH !== null && Object.isFrozen(ZH) !== true) Object.assign(ZH, zh)
+    if (typeof EN === 'object' && EN !== null && Object.isFrozen(EN) !== true) Object.assign(EN, en)
+  } catch (error) {
+    console.error('[flutter-workbench] locale extension failed', error)
+  }
+}
+
+/* -------------------------------------------------------------- network -- */
+
+/** Status buckets offered by the toolbar; server-side via ?status=/?errorsOnly. */
+const FWB_NET_FILTERS = ['all', '2xx', '3xx', '4xx', '5xx', 'error']
+const FWB_NET_METHODS = ['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+const FWB_NET_ROW_HEIGHT = 28
+
+function fwbNetFilterLabel(id) {
+  if (id === 'all') return t('net.all')
+  if (id === 'error') return t('net.errors')
+  return t(`net.c${String(id).charAt(0)}`)
+}
+
+/** ok / warn / error / neutral tone for one request. */
+function fwbNetTone(entry) {
+  if (entry === null || entry === undefined) return 'neutral'
+  if (entry.error !== null && entry.error !== undefined && entry.error !== '') return 'error'
+  const status = Number(entry.status)
+  if (Number.isFinite(status) === false || status <= 0) return entry.complete === false ? 'neutral' : 'neutral'
+  if (status >= 500) return 'error'
+  if (status >= 400) return 'warn'
+  if (status >= 300) return 'neutral'
+  return 'ok'
+}
+
+function fwbNetStatusText(entry) {
+  if (entry === null || entry === undefined) return '—'
+  if (entry.error !== null && entry.error !== undefined && entry.error !== '') return t('net.errorLabel')
+  const status = Number(entry.status)
+  return Number.isFinite(status) && status > 0 ? String(status) : (entry.complete === false ? '…' : '—')
+}
+
+/** Shortest useful path: path + query, clipped in the middle from the left. */
+function fwbNetPath(entry, max) {
+  const limit = Number(max) > 0 ? Number(max) : 120
+  if (entry === null || entry === undefined) return ''
+  const raw = String(entry.path ?? '') !== '' ? String(entry.path) : String(entry.uri ?? '')
+  if (raw.length <= limit) return raw
+  return `…${raw.slice(raw.length - limit + 1)}`
+}
+
+function fwbNetCounts(entries) {
+  const counts = { '2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, error: 0 }
+  for (const entry of entries) {
+    if (entry?.error) {
+      counts.error += 1
+      continue
+    }
+    const status = Number(entry?.status)
+    if (Number.isFinite(status) === false || status <= 0) continue
+    if (status >= 500) counts['5xx'] += 1
+    else if (status >= 400) counts['4xx'] += 1
+    else if (status >= 300) counts['3xx'] += 1
+    else counts['2xx'] += 1
+  }
+  return counts
+}
+
+/** Build a replayable cURL command from the list entry plus loaded detail. */
+function fwbNetCurl(entry, detail) {
+  const method = String(entry?.method ?? 'GET').toUpperCase()
+  const url = String(entry?.uri ?? entry?.path ?? '')
+  const parts = [`curl -X ${method} '${url}'`]
+  const headers = (detail?.requestHeaders ?? entry?.requestHeaders) ?? {}
+  const rows = fwbHeaderRows(headers)
+  for (const [name, value] of rows) {
+    if (/^(content-length|host|connection|accept-encoding)$/i.test(String(name))) continue
+    parts.push(`  -H '${String(name)}: ${String(value)}'`)
+  }
+  const body = fwbBodyText(detail?.requestBody ?? null)
+  if (body !== '') parts.push(`  --data-raw '${body.replace(/'/g, `'\\''`)}'`)
+  return parts.join(' \\\n')
+}
+
+function FwbNetRow({ entry, active, onClick, top }) {
+  const tone = fwbNetTone(entry)
+  const color = fwbToneColor(tone)
+  const path = fwbNetPath(entry, 160)
+  return h('div', {
+    role: 'row',
+    tabIndex: 0,
+    title: `${String(entry?.method ?? '')} ${String(entry?.uri ?? '')}\n${fwbNetStatusText(entry)} · ${fwbDuration(entry?.durationMs)}`,
+    onClick,
+    onKeyDown: (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        onClick()
+      }
+    },
+    style: {
+      position: 'absolute', top, left: 0, right: 0, height: FWB_NET_ROW_HEIGHT,
+      display: 'flex', alignItems: 'center', gap: 8, padding: '0 8px',
+      fontSize: 12, cursor: 'pointer', borderRadius: T.radiusSm,
+      background: active === true ? T.bgInput : 'transparent',
+      border: `1px solid ${active === true ? T.borderStrong : 'transparent'}`,
+      boxSizing: 'border-box',
+    },
+  },
+    h('span', { style: { width: 52, flexShrink: 0, color, fontWeight: 600, fontVariantNumeric: 'tabular-nums' } }, fwbNetStatusText(entry)),
+    h('span', { style: { width: 58, flexShrink: 0, color: T.textDim, fontFamily: T.mono, fontSize: 11 } }, String(entry?.method ?? '')),
+    h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: entry?.error ? T.error : T.text, fontFamily: T.mono, fontSize: 11 } }, path),
+    h('span', { style: { width: 62, flexShrink: 0, textAlign: 'right', color: T.textDim, fontVariantNumeric: 'tabular-nums' } }, fwbDuration(entry?.durationMs)),
+    h('span', { style: { width: 58, flexShrink: 0, textAlign: 'right', color: T.textFaint, fontSize: 11, fontVariantNumeric: 'tabular-nums' } }, fwbClock(entry?.at)))
+}
+
+/**
+ * Windowed list: only the rows around the scroll viewport are mounted, so a
+ * 500-entry buffer stays smooth. Row height is fixed (FWB_NET_ROW_HEIGHT).
+ */
+function FwbNetList({ entries, selectedId, onSelect }) {
+  const viewRef = React.useRef(null)
+  const [scrollTop, setScrollTop] = React.useState(0)
+  const [viewport, setViewport] = React.useState(460)
+
+  React.useEffect(() => {
+    const node = viewRef.current
+    if (node === null || node === undefined) return undefined
+    const measure = () => setViewport(node.clientHeight || 460)
+    measure()
+    if (typeof ResizeObserver === 'function') {
+      const observer = new ResizeObserver(measure)
+      observer.observe(node)
+      return () => observer.disconnect()
+    }
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [])
+
+  if (entries.length === 0) {
+    return h('div', { style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+      h(Card, { style: { maxWidth: 420, textAlign: 'center' } },
+        h('div', { style: { fontWeight: 600, marginBottom: 6 } }, t('net.empty')),
+        h('div', { style: { color: T.textDim, fontSize: 12, lineHeight: 1.6 } }, t('net.emptyHint'))))
+  }
+
+  const total = entries.length
+  const first = Math.max(0, Math.floor(scrollTop / FWB_NET_ROW_HEIGHT) - 8)
+  const visible = Math.ceil(viewport / FWB_NET_ROW_HEIGHT) + 16
+  const slice = entries.slice(first, Math.min(total, first + visible))
+
+  return h('div', {
+    ref: viewRef,
+    onScroll: (event) => setScrollTop(event.currentTarget.scrollTop),
+    style: { flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', position: 'relative' },
+  },
+    h('div', { style: { height: total * FWB_NET_ROW_HEIGHT, position: 'relative' } },
+      slice.map((entry, index) => {
+        const top = (first + index) * FWB_NET_ROW_HEIGHT
+        const id = entry?.id ?? `row-${first + index}`
+        return h(FwbNetRow, {
+          key: id,
+          entry,
+          top,
+          active: selectedId !== null && selectedId === entry?.id,
+          onClick: () => onSelect(entry),
+        })
+      })))
+}
+
+/** One labelled block in the drawer: header row with a copy button + body. */
+function FwbNetSection({ title, text, notify, empty }) {
+  const body = String(text ?? '')
+  return h('div', { style: { borderTop: `1px solid ${T.border}`, padding: '8px 0' } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } },
+      h('div', { style: { flex: 1, fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4, color: T.textFaint } }, title),
+      body === '' ? null : h(FwbCopyBtn, { value: body, notify })),
+    body === ''
+      ? h('div', { style: { color: T.textFaint, fontSize: 12 } }, empty ?? t('net.noBody'))
+      : h(Mono, { style: { display: 'block', maxHeight: 240, overflow: 'auto', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: T.text } }, body))
+}
+
+function FwbNetDetail({ entry, detail, error, loading, onClose, notify }) {
+  if (entry === null || entry === undefined) {
+    return h('div', { style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, color: T.textFaint, fontSize: 12, textAlign: 'center' } }, t('net.selectHint'))
+  }
+
+  const tone = fwbNetTone(entry)
+  const color = fwbToneColor(tone)
+  const requestBody = fwbBodyText(detail?.requestBody ?? null) || String(entry?.contentPreview ?? '')
+  const responseBody = fwbBodyText(detail?.responseBody ?? null)
+  const truncated = detail?.truncated === true
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 } },
+    h('div', { style: { padding: '8px 10px', borderBottom: `1px solid ${T.border}`, flexShrink: 0 } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        h(Pill, { tone, style: { color } }, `${String(entry.method ?? '').toUpperCase()} ${fwbNetStatusText(entry)}`),
+        h('div', { style: { flex: 1, minWidth: 0 } }),
+        h(FwbCopyBtn, { value: String(entry.uri ?? entry.path ?? ''), label: t('net.copyUrl'), notify }),
+        h(Btn, { onClick: onClose, title: t('net.close'), style: { padding: '3px 8px' } }, '✕')),
+      h('div', {
+        title: String(entry.uri ?? ''),
+        style: { marginTop: 6, fontFamily: T.mono, fontSize: 11, color: T.text, overflowWrap: 'anywhere', wordBreak: 'break-all' },
+      }, String(entry.uri ?? entry.path ?? ''))),
+    h('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 10px 12px' } },
+      loading === true ? h('div', { style: { padding: 16, textAlign: 'center', color: T.textDim, fontSize: 12 } }, h(Spinner, null), ` ${t('common.loading')}`) : null,
+      error !== null && error !== undefined
+        ? h('div', { style: { margin: '8px 0', padding: '6px 8px', border: `1px solid ${T.error}`, borderRadius: T.radiusSm, color: T.error, fontSize: 12 } }, String(error?.message ?? error))
+        : null,
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '4px 10px', padding: '8px 0', fontSize: 12 } },
+        h('div', null, h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('net.colTime')), h('div', null, fwbClock(entry.at))),
+        h('div', null, h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('net.colDuration')), h('div', null, fwbDuration(entry.durationMs))),
+        h('div', null, h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('net.host')), h('div', { style: { overflowWrap: 'anywhere' } }, String(entry.host ?? '—'))),
+        h('div', null, h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('net.size')),
+          h('div', null, `${fwbBytes(entry.requestBytes)} → ${fwbBytes(entry.responseBytes)}`))),
+      truncated === true
+        ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, margin: '4px 0 8px' } },
+          h(Pill, { tone: 'warn', style: { color: T.warn } }, t('net.truncated')),
+          h('span', { style: { color: T.textDim, fontSize: 11 } }, t('net.truncatedNote')))
+        : null,
+      error !== null && error !== undefined && entry.error
+        ? h(FwbNetSection, { title: t('net.errorLabel'), text: String(entry.error), notify })
+        : null,
+      h(FwbNetSection, { title: t('net.requestHeaders'), text: fwbHeaderRows(detail?.requestHeaders ?? entry.requestHeaders).map((row) => `${row[0]}: ${row[1]}`).join('\n'), notify, empty: t('net.noHeaders') }),
+      h(FwbNetSection, { title: t('net.responseHeaders'), text: fwbHeaderRows(detail?.responseHeaders ?? entry.responseHeaders).map((row) => `${row[0]}: ${row[1]}`).join('\n'), notify, empty: t('net.noHeaders') }),
+      h(FwbNetSection, { title: t('net.requestBody'), text: requestBody, notify }),
+      h(FwbNetSection, { title: t('net.responseBody'), text: responseBody, notify }),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, paddingTop: 10, borderTop: `1px solid ${T.border}` } },
+        h(FwbCopyBtn, { value: fwbNetCurl(entry, detail), label: t('net.copyCurl'), notify, kind: 'primary' }),
+        h('span', { style: { color: T.textFaint, fontSize: 11 } }, t('net.curlHint')))))
+}
+
+function NetworkPage({ state, actions }) {
+  const act = fwbActions(state, actions)
+  const { notice, push, clear } = useFwbNotify(state, actions)
+  const [statusFilter, setStatusFilter] = React.useState('all')
+  const [method, setMethod] = React.useState('')
+  const [searchDraft, setSearchDraft] = React.useState('')
+  const [pattern, setPattern] = React.useState('')
+  const [paused, setPaused] = React.useState(false)
+  const [selected, setSelected] = React.useState(null)
+  const [detail, setDetail] = React.useState({ loading: false, data: null, error: null })
+
+  React.useEffect(() => {
+    const timer = setTimeout(() => setPattern(searchDraft.trim()), 280)
+    return () => clearTimeout(timer)
+  }, [searchDraft])
+
+  const query = React.useMemo(() => {
+    const next = { limit: 500 }
+    if (statusFilter === 'error') next.errorsOnly = true
+    else if (statusFilter !== 'all') next.status = statusFilter
+    if (method !== '') next.method = method
+    if (pattern !== '') next.pattern = pattern
+    return next
+  }, [statusFilter, method, pattern])
+
+  const queryKey = JSON.stringify(query)
+  const pollMs = paused === true ? 0 : 1500
+  const loadNetwork = React.useCallback(
+    () => fwbInvoke(act, 'fetchNetwork', [query], () => api('/network', { query })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [act, queryKey])
+  const poll = usePoll(loadNetwork, pollMs, [queryKey])
+  const entries = Array.isArray(poll.data?.entries) ? poll.data.entries : []
+  const total = Number.isFinite(Number(poll.data?.total)) ? Number(poll.data.total) : entries.length
+  const counts = React.useMemo(() => fwbNetCounts(entries), [entries])
+  const failure = poll.error ?? null
+
+  // Selected request detail: POST /network/detail { id, runId }.
+  const selectedId = selected?.id ?? null
+  const selectedRunId = selected?.runId ?? null
+  React.useEffect(() => {
+    if (selectedId === null) {
+      setDetail({ loading: false, data: null, error: null })
+      return undefined
+    }
+    let cancelled = false
+    setDetail({ loading: true, data: null, error: null })
+    fwbInvoke(act, 'networkDetail', [{ id: selectedId, runId: selectedRunId }],
+      () => api('/network/detail', { method: 'POST', body: { id: selectedId, runId: selectedRunId } }))
+      .then((response) => {
+        if (cancelled === true) return
+        const request = response?.request ?? response?.detail ?? response ?? null
+        setDetail({ loading: false, data: request, error: null })
+      })
+      .catch((issue) => {
+        if (cancelled === true) return
+        setDetail({ loading: false, data: null, error: issue })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedId, selectedRunId])
+
+  // Keep the drawer in sync with the live list (a refreshed row carries new bytes).
+  React.useEffect(() => {
+    if (selectedId === null || paused === true) return
+    const fresh = entries.find((entry) => entry?.id === selectedId)
+    if (fresh !== undefined && fresh !== selected) setSelected(fresh)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryKey, paused, entries.length, selectedId])
+
+  const onClear = async () => {
+    try {
+      await api('/network/clear', { method: 'POST', body: {} })
+      setSelected(null)
+      setDetail({ loading: false, data: null, error: null })
+      push(t('net.cleared'), 'ok')
+      poll.refresh()
+    } catch (issue) {
+      push(String(issue?.message ?? issue), 'error')
+    }
+  }
+
+  const onExport = () => {
+    if (entries.length === 0) {
+      push(t('net.nothingToExport'), 'warn')
+      return
+    }
+    const payload = JSON.stringify({ exportedAt: Date.now(), query, total, entries }, null, 2)
+    const ok = fwbDownload(`flutter-network-${Date.now()}.json`, payload, 'application/json')
+    push(ok ? t('net.exported', { n: entries.length }) : t('net.exportFailed'), ok ? 'ok' : 'error')
+  }
+
+  const toolbar = h('div', {
+    style: {
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '8px 10px',
+      borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+    },
+  },
+    FWB_NET_FILTERS.map((id) => h(Chip, {
+      key: id,
+      active: statusFilter === id,
+      onClick: () => setStatusFilter(id),
+      title: id === 'error' ? t('net.errorsOnlyHint') : '',
+    }, `${fwbNetFilterLabel(id)}${id !== 'all' && id !== 'error' ? ` ${counts[id] ?? 0}` : id === 'error' ? ` ${counts.error}` : ''}`)),
+    h('div', { style: { width: 1, height: 18, background: T.border, margin: '0 2px' } }),
+    h(Select, {
+      value: method,
+      onChange: (next) => setMethod(String(fwbReadValue(next) ?? '')),
+      options: FWB_NET_METHODS.map((id) => ({ value: id, label: id === '' ? t('net.allMethods') : id })),
+      style: { minWidth: 116 },
+    }),
+    h('div', { style: { flex: 1, minWidth: 160 } },
+      h(Input, {
+        value: searchDraft,
+        onChange: (next) => setSearchDraft(String(fwbReadValue(next) ?? '')),
+        placeholder: t('net.search'),
+        style: { width: '100%' },
+      })),
+    h(Btn, { onClick: () => setPaused((value) => value !== true), title: paused === true ? t('net.resumeHint') : t('net.pauseHint') },
+      paused === true ? `▶ ${t('net.resume')}` : `⏸ ${t('net.pause')}`),
+    h(Btn, { onClick: () => poll.refresh() }, t('common.refresh')),
+    h(Btn, { onClick: onClear, kind: 'danger' }, t('net.clear')),
+    h(Btn, { onClick: onExport }, t('net.export')))
+
+  const listHeader = h('div', {
+    style: {
+      display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 10,
+      textTransform: 'uppercase', letterSpacing: 0.5, color: T.textFaint,
+      borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+    },
+  },
+    h('span', { style: { width: 52 } }, t('net.colStatus')),
+    h('span', { style: { width: 58 } }, t('net.colMethod')),
+    h('span', { style: { flex: 1, minWidth: 0 } }, t('net.colPath')),
+    h('span', { style: { width: 62, textAlign: 'right' } }, t('net.colDuration')),
+    h('span', { style: { width: 58, textAlign: 'right' } }, t('net.colTime')))
+
+  const footer = h('div', {
+    style: {
+      display: 'flex', alignItems: 'center', gap: 10, padding: '4px 10px',
+      borderTop: `1px solid ${T.border}`, color: T.textFaint, fontSize: 11, flexShrink: 0,
+    },
+  },
+    h('span', null, t('net.total', { n: total })),
+    paused === true ? h('span', { style: { color: T.warn } }, t('net.paused')) : h('span', { style: { color: T.ok } }, t('net.live')),
+    h('div', { style: { flex: 1 } }),
+    h('span', null, `${t('net.colStatus')} 2xx/${counts['2xx']} 3xx/${counts['3xx']} 4xx/${counts['4xx']} 5xx/${counts['5xx']}`))
+
+  return h(FwbPage, { notice, onDismiss: clear },
+    toolbar,
+    failure !== null
+      ? h('div', { style: { padding: '6px 10px', color: T.error, fontSize: 12, borderBottom: `1px solid ${T.border}` } },
+        `${t('net.loadFailed')}: ${String(failure?.message ?? failure)}`)
+      : null,
+    h('div', { style: { flex: 1, minHeight: 0, display: 'flex' } },
+      h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
+        listHeader,
+        h(FwbNetList, { entries, selectedId, onSelect: (entry) => setSelected(entry) }),
+        footer),
+      h('div', {
+        style: {
+          width: 460, maxWidth: '55%', minWidth: 280, flexShrink: 0,
+          borderLeft: `1px solid ${T.border}`, display: 'flex', flexDirection: 'column', minHeight: 0,
+        },
+      },
+        h(FwbNetDetail, {
+          entry: selected,
+          detail: detail.data,
+          error: detail.error,
+          loading: detail.loading,
+          onClose: () => setSelected(null),
+          notify: push,
+        }))))
+}
+
+/* ------------------------------------------------------------- locale data -- */
+
+fwbExtendLocale({
+  'time.justNow': '刚刚',
+  'time.secondsAgo': '{n} 秒前',
+  'time.minutesAgo': '{n} 分钟前',
+  'time.hoursAgo': '{n} 小时前',
+  'time.daysAgo': '{n} 天前',
+  'net.all': '全部',
+  'net.c2': '2xx',
+  'net.c3': '3xx',
+  'net.c4': '4xx',
+  'net.c5': '5xx',
+  'net.errors': '错误',
+  'net.errorsOnlyHint': '只显示失败或超时的请求',
+  'net.allMethods': '全部方法',
+  'net.search': '搜索 URL / 主机 / 路径',
+  'net.pause': '暂停',
+  'net.resume': '继续',
+  'net.pauseHint': '暂停实时拉取（已记录的数据保留）',
+  'net.resumeHint': '恢复实时拉取',
+  'net.paused': '已暂停',
+  'net.live': '实时',
+  'net.clear': '清空',
+  'net.cleared': '网络记录已清空',
+  'net.export': '导出',
+  'net.exported': '已导出 {n} 条请求',
+  'net.exportFailed': '导出失败',
+  'net.nothingToExport': '没有可导出的请求',
+  'net.empty': '还没有 HTTP 请求',
+  'net.emptyHint': '运行应用并让它发起网络请求。VM Service 的 HTTP 分析数据会实时出现在这里。',
+  'net.total': '共 {n} 条',
+  'net.colStatus': '状态',
+  'net.colMethod': '方法',
+  'net.colPath': '路径',
+  'net.colDuration': '耗时',
+  'net.colTime': '时间',
+  'net.host': '主机',
+  'net.size': '大小',
+  'net.requestHeaders': '请求头',
+  'net.responseHeaders': '响应头',
+  'net.requestBody': '请求体',
+  'net.responseBody': '响应体',
+  'net.noHeaders': '无',
+  'net.noBody': '（未捕获到内容）',
+  'net.errorLabel': 'ERR',
+  'net.truncated': '已截断',
+  'net.truncatedNote': '内容超出上限，这里只显示前一部分。',
+  'net.copy': '复制',
+  'net.copyUrl': '复制 URL',
+  'net.copyCurl': '复制为 cURL',
+  'net.copied': '已复制',
+  'net.copyFailed': '复制失败',
+  'net.curlHint': '可直接在终端重放这条请求',
+  'net.selectHint': '选择一条请求即可查看请求头、响应头与正文。',
+  'net.close': '关闭',
+  'net.detailFailed': '加载请求详情失败',
+  'net.loadFailed': '加载网络请求失败',
+}, {
+  'time.justNow': 'just now',
+  'time.secondsAgo': '{n}s ago',
+  'time.minutesAgo': '{n}m ago',
+  'time.hoursAgo': '{n}h ago',
+  'time.daysAgo': '{n}d ago',
+  'net.all': 'All',
+  'net.c2': '2xx',
+  'net.c3': '3xx',
+  'net.c4': '4xx',
+  'net.c5': '5xx',
+  'net.errors': 'Errors',
+  'net.errorsOnlyHint': 'Only failed or timed-out requests',
+  'net.allMethods': 'All methods',
+  'net.search': 'Search URL / host / path',
+  'net.pause': 'Pause',
+  'net.resume': 'Resume',
+  'net.pauseHint': 'Stop pulling live traffic (captured rows stay)',
+  'net.resumeHint': 'Resume live traffic',
+  'net.paused': 'paused',
+  'net.live': 'live',
+  'net.clear': 'Clear',
+  'net.cleared': 'Network capture cleared',
+  'net.export': 'Export',
+  'net.exported': 'Exported {n} requests',
+  'net.exportFailed': 'Export failed',
+  'net.nothingToExport': 'No requests to export',
+  'net.empty': 'No HTTP requests yet',
+  'net.emptyHint': 'Run the app and let it make network calls — the VM Service HTTP profile shows up here live.',
+  'net.total': '{n} requests',
+  'net.colStatus': 'Status',
+  'net.colMethod': 'Method',
+  'net.colPath': 'Path',
+  'net.colDuration': 'Time',
+  'net.colTime': 'At',
+  'net.host': 'Host',
+  'net.size': 'Size',
+  'net.requestHeaders': 'Request headers',
+  'net.responseHeaders': 'Response headers',
+  'net.requestBody': 'Request body',
+  'net.responseBody': 'Response body',
+  'net.noHeaders': 'none',
+  'net.noBody': '(nothing captured)',
+  'net.errorLabel': 'ERR',
+  'net.truncated': 'Truncated',
+  'net.truncatedNote': 'The body exceeds the capture limit; only the first part is shown.',
+  'net.copy': 'Copy',
+  'net.copyUrl': 'Copy URL',
+  'net.copyCurl': 'Copy as cURL',
+  'net.copied': 'Copied',
+  'net.copyFailed': 'Copy failed',
+  'net.curlHint': 'Replay this request straight from a terminal',
+  'net.selectHint': 'Pick a request to inspect headers, bodies and timing.',
+  'net.close': 'Close',
+  'net.detailFailed': 'Could not load the request detail',
+  'net.loadFailed': 'Could not load network requests',
+})
 
     /* ==== 50-board.js ==== */
 /* ====================================================================== *
@@ -4597,18 +7033,1125 @@ fwbExtendLocale({
     /* ==== 60-quality.js ==== */
 /* ====================================================================== *
  * 60-quality.js — owner: dev-ui-data
- * QualityPage: analyze / test / errors / perf / screenshot.
- * SettingsPage: every setting from the host descriptor.
- * PLACEHOLDER: replace with the real implementation per docs/CONTRACTS.md §8.2.
+ *
+ * QualityPage: analyzer, tests, deduped exceptions, frames/jank, screenshot.
+ * SettingsPage: every host setting as a typed control plus the MCP connection
+ *               block (endpoint URL, token with copy/rotate, client hints).
+ *
+ * Host surface used (docs/CONTRACTS.md §6, §7):
+ *   POST /toolchain { action:'analyze'|'test' } → { jobId }
+ *   GET  /job?id=              → { job:{ id, action, status, result, error } }
+ *   GET  /errors               → { groups:[ErrorGroup] }
+ *   GET  /settings, POST /settings { patch }
+ *   POST /screenshot           → { path, bytes, width, height } | { base64, mime }
+ *   POST /open { file, line }  → editor jump (falls back to copying path:line)
+ *   GET  /perf?runId=          → frame stats (no contract route; degrades cleanly)
+ *
+ * Kit surface consumed: Btn, IconBtn, Pill, Chip, Card, Field, Input, TextArea,
+ * Select, Checkbox, Empty, Spinner, Mono, t. Shared helpers come from
+ * 40-network.js and 50-board.js.
  * ====================================================================== */
 
-function QualityPage({ state }) {
-  return h(PageStub, { name: t('nav.quality') })
+/* ------------------------------------------------------------ constants -- */
+
+const FWB_MCP_PATH = '/api/flutter-workbench/mcp'
+const FWB_QUALITY_TABS = ['analyze', 'test', 'errors', 'perf', 'screenshot']
+const FWB_SEVERITIES = ['error', 'warning', 'info']
+
+/**
+ * Fallback setting schema. GET /settings may include `descriptor`
+ * (host/settings.js SETTING_SPEC); when it does not, the type is inferred from
+ * the value and these defaults keep pickers/numbers sane.
+ */
+const FWB_SETTINGS_SPEC = {
+  flutterPath: { type: 'string' },
+  dartPath: { type: 'string' },
+  editorCommand: { type: 'string' },
+  dataDir: { type: 'string' },
+  defaultProvider: { type: 'string' },
+  defaultModel: { type: 'string' },
+  logCapacity: { type: 'number' },
+  autoRefreshMs: { type: 'number' },
+  networkAutoRefreshMs: { type: 'number' },
+  maxTaskConcurrency: { type: 'number' },
+  autoStart: { type: 'boolean' },
+  analysisEnabled: { type: 'boolean' },
+  mcpEnabled: { type: 'boolean' },
+  mcpToken: { type: 'string', secret: true },
 }
 
-function SettingsPage({ state }) {
-  return h(PageStub, { name: t('nav.settings') })
+/* -------------------------------------------------------------- helpers -- */
+
+function fwbSeverityTone(severity) {
+  if (severity === 'error') return 'error'
+  if (severity === 'warning') return 'warn'
+  if (severity === 'info') return 'info'
+  return 'neutral'
 }
+
+function fwbSeverityLabel(severity) {
+  if (severity === 'error') return t('quality.severity.error')
+  if (severity === 'warning') return t('quality.severity.warning')
+  if (severity === 'info') return t('quality.severity.info')
+  return String(severity ?? '')
+}
+
+/** Jump to `file:line` through the editor action, falling back to a copy. */
+function fwbJumpToFile(act, push, file, line) {
+  const target = String(file ?? '')
+  if (target === '') return
+  const at = Number(line)
+  const safeLine = Number.isFinite(at) && at > 0 ? at : undefined
+  fwbInvoke(act, 'openFile', [target, safeLine], () => api('/open', { method: 'POST', body: { file: target, line: safeLine } }))
+    .catch(async (issue) => {
+      const copy = await fwbCopy(`${target}${safeLine === undefined ? '' : `:${safeLine}`}`)
+      push(`${t('quality.openFailed')}: ${String(issue?.message ?? issue)}${copy === true ? ` ${t('quality.pathCopied')}` : ''}`, 'error')
+    })
+}
+
+/** File path + line cell used by the analyzer and exception panes. */
+function FwbFileLink({ file, line, column, act, push }) {
+  const path = String(file ?? '')
+  if (path === '') return null
+  const where = `${path}${Number.isFinite(Number(line)) ? `:${line}` : ''}${Number.isFinite(Number(column)) ? `:${column}` : ''}`
+  return h(Btn, {
+    kind: 'text',
+    title: t('quality.jumpHint', { where }),
+    onClick: () => fwbJumpToFile(act, push, path, line),
+    style: {
+      padding: '1px 4px', border: 'none', background: 'transparent',
+      color: T.brand, fontFamily: T.mono, fontSize: 11, cursor: 'pointer',
+      textAlign: 'left', overflowWrap: 'anywhere', maxWidth: '100%',
+    },
+  }, where)
+}
+
+/**
+ * Async toolchain runner: POST /toolchain returns a job id, then GET /job is
+ * polled until the job leaves `running`.
+ */
+function useFwbJob(act) {
+  const [job, setJob] = React.useState(null)
+  const [starting, setStarting] = React.useState(false)
+  const [error, setError] = React.useState(null)
+
+  const run = React.useCallback(async (body) => {
+    setStarting(true)
+    setError(null)
+    setJob(null)
+    try {
+      const response = await fwbInvoke(act, 'runToolchain', [body], () => api('/toolchain', { method: 'POST', body }))
+      const id = response?.jobId ?? response?.job?.id ?? null
+      if (id === null || id === undefined || id === '') {
+        throw Object.assign(new Error(t('quality.noJob')), { code: 'no-job' })
+      }
+      setJob({ id, action: body?.action ?? '', status: 'running' })
+    } catch (issue) {
+      setError(issue)
+      setStarting(false)
+    }
+  }, [act])
+
+  const jobId = job?.id ?? null
+  const jobStatus = job?.status ?? null
+
+  React.useEffect(() => {
+    if (jobId === null || jobStatus !== 'running') return undefined
+    let cancelled = false
+    let timer = null
+    const tick = async () => {
+      try {
+        const response = await fwbInvoke(act, 'getJob', [jobId], () => api('/job', { query: { id: jobId } }))
+        const next = response?.job ?? response ?? null
+        if (cancelled === true) return
+        if (next === null || typeof next !== 'object') {
+          setError(Object.assign(new Error(t('quality.noJob')), { code: 'no-job' }))
+          setStarting(false)
+          return
+        }
+        setJob(next)
+        if (next?.status === 'running') timer = setTimeout(tick, 700)
+        else setStarting(false)
+      } catch (issue) {
+        if (cancelled === true) return
+        setError(issue)
+        setStarting(false)
+      }
+    }
+    timer = setTimeout(tick, 400)
+    return () => {
+      cancelled = true
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [jobId, jobStatus, act])
+
+  const reset = React.useCallback(() => {
+    setJob(null)
+    setError(null)
+    setStarting(false)
+  }, [])
+
+  return { job, running: starting === true || jobStatus === 'running', error, run, reset }
+}
+
+/** Project selector shared by the analyze/test panes. */
+function FwbProjectPicker({ projects, value, onChange }) {
+  const list = Array.isArray(projects) ? projects : []
+  if (list.length <= 1) {
+    const only = list.find((project) => String(project?.id ?? '') === String(value ?? '')) ?? list[0] ?? null
+    return h('span', { style: { color: T.textDim, fontSize: 11 } },
+      only === null ? t('quality.noProject') : `📁 ${String(only.name ?? only.path ?? only.id ?? '')}`)
+  }
+  return h(Select, {
+    value: String(value ?? ''),
+    onChange: (next) => onChange(String(fwbReadValue(next) ?? '')),
+    options: list.map((project) => ({ value: String(project?.id ?? ''), label: String(project?.name ?? project?.id ?? '') })),
+    style: { minWidth: 150 },
+  })
+}
+
+/** Job status strip (idle / running / failed) for a toolchain pane. */
+function FwbJobStatus({ job, running, error, onRetry }) {
+  if (error !== null && error !== undefined) {
+    return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', color: T.error, fontSize: 12 } },
+      h('span', { style: { flex: 1, minWidth: 0, overflowWrap: 'anywhere' } }, `${t('quality.jobFailed')}: ${String(error?.message ?? error)}`),
+      typeof onRetry === 'function' ? h(Btn, { onClick: onRetry }, t('common.retry')) : null)
+  }
+  if (running === true) {
+    return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', color: T.textDim, fontSize: 12 } },
+      h(Spinner, { size: 12 }), t('quality.running'))
+  }
+  if (job?.status === 'failed') {
+    return h('div', { style: { padding: '4px 0', color: T.error, fontSize: 12 } },
+      `${t('quality.jobFailed')}: ${String(job?.error ?? '—')}`)
+  }
+  return null
+}
+
+/* -------------------------------------------------------------- analyze -- */
+
+function FwbAnalyzePane({ state, act, push }) {
+  const job = useFwbJob(act)
+  const [projectId, setProjectId] = React.useState(String(state?.activeProjectId ?? ''))
+  const [showRaw, setShowRaw] = React.useState(false)
+
+  const result = job.job?.result ?? null
+  const issues = Array.isArray(result?.issues) ? result.issues : []
+  const counts = result?.counts ?? null
+
+  const groups = React.useMemo(() => {
+    const map = new Map(FWB_SEVERITIES.map((severity) => [severity, []]))
+    for (const issue of issues) {
+      const severity = String(issue?.severity ?? 'info')
+      if (map.has(severity) === false) map.set(severity, [])
+      map.get(severity).push(issue)
+    }
+    return [...map.entries()].filter(([, list]) => list.length > 0)
+  }, [issues])
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 } },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 } },
+      h(FwbProjectPicker, { projects: state?.projects, value: projectId, onChange: setProjectId }),
+      h(Btn, {
+        kind: 'primary',
+        disabled: job.running === true,
+        onClick: () => job.run({ action: 'analyze', projectId: projectId === '' ? undefined : projectId }),
+      }, job.running === true ? t('quality.analyzing') : t('quality.runAnalyze')),
+      counts !== null
+        ? h('div', { style: { display: 'flex', gap: 6 } },
+          h(Pill, { tone: 'error', style: { color: T.error } }, `${t('quality.severity.error')} ${Number(counts.error ?? 0)}`),
+          h(Pill, { tone: 'warn', style: { color: T.warn } }, `${t('quality.severity.warning')} ${Number(counts.warning ?? 0)}`),
+          h(Pill, { tone: 'info' }, `${t('quality.severity.info')} ${Number(counts.info ?? 0)}`))
+        : null,
+      h('div', { style: { flex: 1 } }),
+      result?.raw !== undefined ? h(Btn, { onClick: () => setShowRaw((value) => value !== true) }, showRaw === true ? t('quality.hideRaw') : t('quality.showRaw')) : null),
+
+    h(FwbJobStatus, { job: job.job, running: job.running, error: job.error, onRetry: () => job.run({ action: 'analyze', projectId: projectId === '' ? undefined : projectId }) }),
+
+    job.job?.status === 'done' && issues.length === 0
+      ? h(Card, { style: { padding: 16, textAlign: 'center', color: T.ok } }, t('quality.analyzeClean'))
+      : null,
+
+    issues.length === 0 ? (job.job?.status === 'done' ? null : h(Empty, { text: t('quality.analyzeHint') })) : null,
+
+    h('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 } },
+      groups.map(([severity, list]) => h(Card, {
+        key: severity,
+        title: `${fwbSeverityLabel(severity)} · ${list.length}`,
+        style: { padding: 8 },
+      },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+          list.map((issue, index) => h('div', {
+            key: `${severity}-${index}`,
+            style: { display: 'flex', gap: 8, alignItems: 'flex-start', padding: '3px 0', borderTop: index === 0 ? 'none' : `1px solid ${T.border}` },
+          },
+            h(Pill, { tone: fwbSeverityTone(severity), style: { fontSize: 10, color: fwbToneColor(fwbSeverityTone(severity)), flexShrink: 0 } }, String(issue?.code ?? severity)),
+            h('div', { style: { flex: 1, minWidth: 0 } },
+              h('div', { style: { fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' } }, String(issue?.message ?? '')),
+              h(FwbFileLink, { file: issue?.file, line: issue?.line, column: issue?.column, act, push })))))) ),
+
+    showRaw === true && result?.raw !== undefined
+      ? h(Card, { title: t('quality.raw'), style: { padding: 8, maxHeight: 220, overflow: 'auto' } },
+        h(Mono, { style: { fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, String(result.raw ?? '')))
+      : null))
+}
+
+/* ----------------------------------------------------------------- test -- */
+
+function FwbTestPane({ state, act, push }) {
+  const job = useFwbJob(act)
+  const [projectId, setProjectId] = React.useState(String(state?.activeProjectId ?? ''))
+  const [target, setTarget] = React.useState('')
+  const [name, setName] = React.useState('')
+  const [onlyFailed, setOnlyFailed] = React.useState(false)
+  const [expanded, setExpanded] = React.useState({})
+
+  const result = job.job?.result ?? null
+  const tests = Array.isArray(result?.tests) ? result.tests : []
+  const visible = onlyFailed === true ? tests.filter((test) => test?.status === 'failed') : tests
+
+  const runTests = () => {
+    const body = { action: 'test' }
+    if (projectId !== '') body.projectId = projectId
+    if (target.trim() !== '') body.target = target.trim()
+    if (name.trim() !== '') body.name = name.trim()
+    job.run(body)
+  }
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 } },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 } },
+      h(FwbProjectPicker, { projects: state?.projects, value: projectId, onChange: setProjectId }),
+      h(Input, {
+        value: target,
+        placeholder: t('quality.testTarget'),
+        onChange: (next) => setTarget(String(fwbReadValue(next) ?? '')),
+        style: { minWidth: 180, flex: 1 },
+      }),
+      h(Input, {
+        value: name,
+        placeholder: t('quality.testName'),
+        onChange: (next) => setName(String(fwbReadValue(next) ?? '')),
+        style: { minWidth: 140 },
+      }),
+      h(Btn, { kind: 'primary', disabled: job.running === true, onClick: runTests },
+        job.running === true ? t('quality.testing') : t('quality.runTest'))),
+
+    h(FwbJobStatus, { job: job.job, running: job.running, error: job.error, onRetry: runTests }),
+
+    result !== null
+      ? h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 } },
+        h(Pill, { tone: 'ok', style: { color: T.ok } }, `${t('quality.passed')} ${Number(result.passed ?? 0)}`),
+        h(Pill, { tone: Number(result.failed ?? 0) > 0 ? 'error' : 'neutral', style: { color: Number(result.failed ?? 0) > 0 ? T.error : T.textDim } },
+          `${t('quality.failed')} ${Number(result.failed ?? 0)}`),
+        h(Pill, { tone: 'neutral' }, `${t('quality.skipped')} ${Number(result.skipped ?? 0)}`),
+        h(Pill, { tone: 'info' }, fwbDuration(result.durationMs)),
+        h('div', { style: { flex: 1 } }),
+        h(Checkbox, { checked: onlyFailed, onChange: (next) => setOnlyFailed(fwbReadValue(next) === true), label: t('quality.onlyFailed') }))
+      : null,
+
+    tests.length === 0 && job.job?.status !== 'done' ? h(Empty, { text: t('quality.testHint') }) : null,
+    tests.length === 0 && job.job?.status === 'done' ? h(Card, { style: { padding: 12, color: T.textDim, fontSize: 12 } }, t('quality.noTests')) : null,
+
+    h('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 } },
+      visible.map((test, index) => {
+        const key = String(test?.id ?? `${test?.name ?? index}`)
+        const failed = test?.status === 'failed'
+        const open = expanded[key] === true
+        return h('div', {
+          key,
+          style: {
+            border: `1px solid ${failed ? T.error : T.border}`, borderRadius: T.radiusSm,
+            background: T.bgRaised, padding: '5px 8px',
+          },
+        },
+          h('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 8, cursor: failed ? 'pointer' : 'default' },
+            onClick: () => {
+              if (failed !== true) return
+              setExpanded((prev) => ({ ...prev, [key]: prev[key] !== true }))
+            },
+          },
+            h('span', { style: { color: failed ? T.error : test?.status === 'skipped' ? T.textFaint : T.ok, width: 12 } },
+              failed ? '✗' : test?.status === 'skipped' ? '–' : '✓'),
+            h('span', { style: { flex: 1, minWidth: 0, fontSize: 12, overflowWrap: 'anywhere' } }, String(test?.name ?? '')),
+            String(test?.group ?? '') !== '' ? h('span', { style: { color: T.textFaint, fontSize: 10 } }, String(test.group)) : null,
+            h('span', { style: { color: T.textFaint, fontSize: 10, fontVariantNumeric: 'tabular-nums' } }, fwbDuration(test?.durationMs)),
+            failed === true ? h('span', { style: { color: T.textDim, fontSize: 10 } }, open === true ? '▾' : '▸') : null),
+          failed === true && open === true
+            ? h('div', { style: { marginTop: 6, borderTop: `1px solid ${T.border}`, paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 6 } },
+              String(test?.error ?? '') !== '' ? h(Mono, { style: { fontSize: 11, color: T.error, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, String(test.error)) : null,
+              String(test?.stack ?? '') !== ''
+                ? h('div', null,
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 } },
+                    h('span', { style: { flex: 1, color: T.textFaint, fontSize: 10, textTransform: 'uppercase' } }, t('quality.stack')),
+                    h(FwbCopyBtn, { value: String(test.stack), notify: push })),
+                  h(Mono, { style: { fontSize: 11, maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, String(test.stack)))
+                : null)
+            : null)
+      })))
+}
+
+/* --------------------------------------------------------------- errors -- */
+
+function FwbErrorsPane({ state, act, push }) {
+  const [kind, setKind] = React.useState('')
+  const [pattern, setPattern] = React.useState('')
+  const [openFp, setOpenFp] = React.useState(null)
+
+  const query = React.useMemo(() => {
+    const next = { limit: 200 }
+    if (kind !== '') next.kind = kind
+    if (pattern !== '') next.pattern = pattern
+    return next
+  }, [kind, pattern])
+  const queryKey = JSON.stringify(query)
+  const poll = usePoll(
+    () => fwbInvoke(act, 'fetchErrors', [query], () => api('/errors', { query })),
+    3000,
+    [queryKey])
+  const groups = Array.isArray(poll.data?.groups) ? poll.data.groups : []
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 } },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 } },
+      h(Select, {
+        value: kind,
+        onChange: (next) => setKind(String(fwbReadValue(next) ?? '')),
+        options: [
+          { value: '', label: t('quality.allKinds') },
+          { value: 'flutter', label: 'flutter' },
+          { value: 'dart', label: 'dart' },
+          { value: 'platform', label: 'platform' },
+          { value: 'test', label: 'test' },
+          { value: 'analyze', label: 'analyze' },
+        ],
+        style: { minWidth: 130 },
+      }),
+      h(Input, {
+        value: pattern,
+        placeholder: t('quality.errorSearch'),
+        onChange: (next) => setPattern(String(fwbReadValue(next) ?? '')),
+        style: { flex: 1, minWidth: 160 },
+      }),
+      h(Btn, { onClick: () => poll.refresh() }, t('common.refresh')),
+      h('span', { style: { color: T.textFaint, fontSize: 11 } }, t('quality.groupCount', { n: Number(poll.data?.total ?? groups.length) }))),
+
+    poll.error !== null
+      ? h('div', { style: { color: T.error, fontSize: 12 } }, `${t('quality.errorsFailed')}: ${String(poll.error?.message ?? poll.error)}`)
+      : null,
+
+    groups.length === 0
+      ? h(Empty, { text: t('quality.errorsEmpty') })
+      : h('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 } },
+        groups.map((group) => {
+          const key = String(group?.fp ?? group?.message ?? Math.random())
+          const open = openFp === key
+          const frames = Array.isArray(group?.frames) ? group.frames : []
+          const tone = group?.handled === true ? 'neutral' : 'error'
+          return h('div', {
+            key,
+            style: { border: `1px solid ${open === true ? T.borderStrong : T.border}`, borderRadius: T.radiusSm, background: T.bgRaised },
+          },
+            h('div', {
+              style: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 8px', cursor: 'pointer' },
+              onClick: () => setOpenFp(open === true ? null : key),
+            },
+              h(Pill, { tone, style: { fontSize: 10, color: tone === 'error' ? T.error : T.textDim, flexShrink: 0 } }, `×${Number(group?.count ?? 1)}`),
+              h('div', { style: { flex: 1, minWidth: 0 } },
+                h('div', { style: { fontSize: 12, lineHeight: 1.5, overflowWrap: 'anywhere' } }, String(group?.message ?? '')),
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, color: T.textFaint, fontSize: 10, marginTop: 2 } },
+                  h('span', null, String(group?.kind ?? '—')),
+                  h('span', null, `${t('quality.lastAt')} ${fwbClock(group?.lastAt)} (${fwbAgo(group?.lastAt)})`),
+                  h('span', null, `${t('quality.firstAt')} ${fwbClock(group?.firstAt)}`),
+                  String(group?.exception ?? '') !== '' ? h('span', null, String(group.exception)) : null)),
+              h('span', { style: { color: T.textDim, fontSize: 11 } }, open === true ? '▾' : '▸')),
+
+            open === true
+              ? h('div', { style: { borderTop: `1px solid ${T.border}`, padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 6 } },
+                frames.length > 0
+                  ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 1 } },
+                    frames.slice(0, 14).map((frame, index) => h('div', { key: `frame-${index}`, style: { display: 'flex', gap: 8, alignItems: 'center' } },
+                      h('span', { style: { color: T.textFaint, fontSize: 10, width: 16, textAlign: 'right' } }, String(index + 1)),
+                      h(FwbFileLink, { file: frame?.file, line: frame?.line, column: frame?.column, act, push }),
+                      String(frame?.symbol ?? '') !== '' ? h('span', { style: { color: T.textDim, fontSize: 10, overflowWrap: 'anywhere' } }, String(frame.symbol)) : null)))
+                  : null,
+                String(group?.stack ?? '') !== ''
+                  ? h('div', null,
+                    h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 } },
+                      h('span', { style: { flex: 1, color: T.textFaint, fontSize: 10, textTransform: 'uppercase' } }, t('quality.stack')),
+                      h(FwbCopyBtn, { value: String(group.stack), notify: push })),
+                    h(Mono, { style: { fontSize: 11, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, String(group.stack)))
+                  : null,
+                String(group?.context ?? '') !== ''
+                  ? h('div', null,
+                    h('div', { style: { color: T.textFaint, fontSize: 10, textTransform: 'uppercase', marginBottom: 2 } }, t('quality.context')),
+                    h(Mono, { style: { fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: T.textDim } }, String(group.context)))
+                  : null)
+              : null)
+        })))
+}
+
+/* ----------------------------------------------------------------- perf -- */
+
+function FwbPerfPane({ state, push }) {
+  const [perf, setPerf] = React.useState(null)
+  const [error, setError] = React.useState(null)
+  const [loading, setLoading] = React.useState(false)
+  const runId = state?.activeRunId ?? null
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      // No contract route yet; the flutter_perf tool uses the same host method.
+      const response = await api('/perf', { query: runId === null ? undefined : { runId } })
+      setPerf(response?.perf ?? response ?? null)
+    } catch (issue) {
+      setError(issue)
+      setPerf(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const frames = Array.isArray(perf?.frames) ? perf.frames : []
+  const jankCount = Number(perf?.jankCount ?? 0)
+  const worstMs = Number(perf?.worstMs ?? 0)
+  const worst = React.useMemo(
+    () => [...frames].sort((a, b) => (Number(b?.elapsedMs) || 0) - (Number(a?.elapsedMs) || 0)).slice(0, 5),
+    [frames])
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 } },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 } },
+      h('span', { style: { color: T.textDim, fontSize: 11 } }, runId === null ? t('quality.noActiveRun') : `run ${String(runId)}`),
+      h(Btn, { kind: 'primary', disabled: loading === true, onClick: load }, loading === true ? h(Spinner, { size: 12 }) : t('quality.loadPerf')),
+      perf !== null
+        ? h('div', { style: { display: 'flex', gap: 6 } },
+          h(Pill, { tone: 'info' }, `${t('quality.frameCount')} ${frames.length}`),
+          h(Pill, { tone: jankCount > 0 ? 'warn' : 'ok', style: { color: jankCount > 0 ? T.warn : T.ok } }, `${t('quality.jankCount')} ${jankCount}`),
+          h(Pill, { tone: worstMs > 16 ? 'warn' : 'ok', style: { color: worstMs > 16 ? T.warn : T.ok } }, `${t('quality.worstFrame')} ${fwbDuration(worstMs)}`))
+        : null),
+
+    error !== null
+      ? h(Card, { style: { padding: 12, fontSize: 12, color: T.textDim } },
+        h('div', { style: { color: T.warn, marginBottom: 4 } }, t('quality.perfUnavailable')),
+        h('div', { style: { fontFamily: T.mono, fontSize: 11, overflowWrap: 'anywhere' } }, String(error?.message ?? error)))
+      : null,
+
+    perf === null && error === null ? h(Empty, { text: t('quality.perfHint') }) : null,
+
+    worst.length > 0
+      ? h(Card, { title: t('quality.worstFrames'), style: { padding: 8 } },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+          worst.map((frame, index) => h('div', { key: `worst-${index}`, style: { display: 'flex', gap: 10, fontSize: 11 } },
+            h('span', { style: { color: T.textFaint, width: 42 } }, `#${String(frame?.number ?? index)}`),
+            h('span', { style: { color: T.text, width: 64, textAlign: 'right' } }, fwbDuration(frame?.elapsedMs)),
+            h('span', { style: { color: T.textDim } }, `build ${fwbDuration(frame?.buildMs)}`),
+            h('span', { style: { color: T.textDim } }, `raster ${fwbDuration(frame?.rasterMs)}`)))))
+      : null,
+
+    frames.length > 0
+      ? h(Card, { title: t('quality.allFrames'), style: { padding: 8, flex: 1, minHeight: 0, overflow: 'auto' } },
+        h('div', { style: { display: 'grid', gridTemplateColumns: '48px 1fr 1fr 1fr', gap: '2px 10px', fontSize: 11 } },
+          h('span', { style: { color: T.textFaint } }, '#'),
+          h('span', { style: { color: T.textFaint } }, t('quality.total')),
+          h('span', { style: { color: T.textFaint } }, 'build'),
+          h('span', { style: { color: T.textFaint } }, 'raster'),
+          frames.map((frame, index) => h(React.Fragment, { key: `frame-row-${index}` },
+            h('span', { style: { color: T.textFaint } }, String(frame?.number ?? index)),
+            h('span', null, fwbDuration(frame?.elapsedMs)),
+            h('span', null, fwbDuration(frame?.buildMs)),
+            h('span', null, fwbDuration(frame?.rasterMs))))))
+      : null)
+}
+
+/* ----------------------------------------------------------- screenshot -- */
+
+/** Candidate image URLs for a POST /screenshot payload, most direct first. */
+function fwbShotSources(shot) {
+  if (shot === null || shot === undefined) return []
+  const list = []
+  if (typeof shot.dataUrl === 'string' && shot.dataUrl.startsWith('data:')) list.push(shot.dataUrl)
+  const base64 = shot.base64 ?? shot.data
+  if (typeof base64 === 'string' && base64 !== '') list.push(`data:${shot.mime ?? 'image/png'};base64,${base64}`)
+  if (typeof shot.path === 'string' && shot.path !== '') {
+    // The host saves the PNG; serve it back same-origin (see report).
+    list.push(`${API}/file?path=${encodeURIComponent(shot.path)}`)
+    list.push(`${API}/screenshot/file?path=${encodeURIComponent(shot.path)}`)
+  }
+  return list
+}
+
+function FwbScreenshotPane({ state, act, push }) {
+  const [shot, setShot] = React.useState(null)
+  const [error, setError] = React.useState(null)
+  const [loading, setLoading] = React.useState(false)
+  const [sourceIndex, setSourceIndex] = React.useState(0)
+  const runId = state?.activeRunId ?? null
+
+  const sources = React.useMemo(() => fwbShotSources(shot), [shot])
+
+  React.useEffect(() => {
+    setSourceIndex(0)
+  }, [shot])
+
+  const capture = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await fwbInvoke(act, 'screenshot', [runId === null ? {} : { runId }],
+        () => api('/screenshot', { method: 'POST', body: runId === null ? {} : { runId } }))
+      setShot(response ?? null)
+      push(t('quality.shotSaved'), 'ok')
+    } catch (issue) {
+      setError(issue)
+      setShot(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const src = sources[sourceIndex] ?? null
+
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 10, minHeight: 0 } },
+    h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 } },
+      h(Btn, { kind: 'primary', disabled: loading === true, onClick: capture }, loading === true ? h(Spinner, { size: 12 }) : t('quality.capture')),
+      shot?.path !== undefined && shot?.path !== null
+        ? h('span', { style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } },
+          h(Mono, { style: { fontSize: 11, color: T.textDim, overflowWrap: 'anywhere' } }, String(shot.path)),
+          h(FwbCopyBtn, { value: String(shot.path), label: t('quality.copyPath'), notify: push }))
+        : null,
+      Number.isFinite(Number(shot?.bytes)) ? h('span', { style: { color: T.textFaint, fontSize: 11 } }, fwbBytes(shot.bytes)) : null,
+      Number.isFinite(Number(shot?.width)) && Number.isFinite(Number(shot?.height))
+        ? h('span', { style: { color: T.textFaint, fontSize: 11 } }, `${shot.width}×${shot.height}`)
+        : null),
+
+    error !== null
+      ? h('div', { style: { color: T.error, fontSize: 12 } }, `${t('quality.shotFailed')}: ${String(error?.message ?? error)}`)
+      : null,
+
+    shot === null
+      ? h(Empty, { text: t('quality.shotHint') })
+      : h(Card, { style: { padding: 8, flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+        src === null
+          ? h('div', { style: { color: T.textDim, fontSize: 12 } }, t('quality.shotNoSource'))
+          : h('img', {
+            src,
+            alt: t('quality.shotAlt'),
+            onError: () => {
+              // Try the next candidate route before giving up.
+              setSourceIndex((current) => (current + 1 < sources.length ? current + 1 : current))
+            },
+            style: { maxWidth: '100%', maxHeight: '100%', border: `1px solid ${T.border}`, borderRadius: T.radiusSm, background: T.bgInput },
+          })))
+}
+
+/* -------------------------------------------------------------- quality -- */
+
+function FwbQualityTabs({ value, onChange }) {
+  return h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, padding: '8px 10px', borderBottom: `1px solid ${T.border}`, flexShrink: 0 } },
+    FWB_QUALITY_TABS.map((id) => h(Chip, {
+      key: id,
+      active: value === id,
+      onClick: () => onChange(id),
+    }, t(`quality.tab.${id}`))))
+}
+
+function QualityPage({ state, actions }) {
+  const act = fwbActions(state, actions)
+  const { notice, push, clear } = useFwbNotify(state, actions)
+  const [tab, setTab] = React.useState('analyze')
+
+  return h(FwbPage, { notice, onDismiss: clear },
+    h(FwbQualityTabs, { value: tab, onChange: setTab }),
+    h('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto' } },
+      tab === 'analyze' ? h(FwbAnalyzePane, { state, act, push }) : null,
+      tab === 'test' ? h(FwbTestPane, { state, act, push }) : null,
+      tab === 'errors' ? h(FwbErrorsPane, { state, act, push }) : null,
+      tab === 'perf' ? h(FwbPerfPane, { state, push }) : null,
+      tab === 'screenshot' ? h(FwbScreenshotPane, { state, act, push }) : null))
+}
+
+/* ------------------------------------------------------------- settings -- */
+
+function fwbOrigin() {
+  try {
+    if (typeof window !== 'undefined' && window.location !== undefined) return String(window.location.origin ?? '')
+  } catch (error) {
+    /* non-browser */
+  }
+  return ''
+}
+
+/** Absolute MCP endpoint; the path must equal MCP_PATH in host/httpapi.js. */
+function fwbMcpUrl(state) {
+  const path = String(state?.snapshot?.mcpPath ?? state?.mcpPath ?? FWB_MCP_PATH)
+  return `${fwbOrigin()}${path}`
+}
+
+function fwbMcpSnippet(url, token, flavor) {
+  const entry = { type: 'http', url }
+  if (String(token ?? '') !== '') entry.headers = { Authorization: `Bearer ${token}` }
+  const body = flavor === 'cursor'
+    ? { mcpServers: { 'flutter-workbench': entry } }
+    : { servers: { 'flutter-workbench': entry } }
+  try {
+    return JSON.stringify(body, null, 2)
+  } catch (error) {
+    return '{}'
+  }
+}
+
+function fwbSettingType(key, value, descriptor) {
+  const declared = descriptor !== null && descriptor !== undefined ? descriptor[String(key)] : null
+  const type = declared?.type
+  if (type === 'number' || type === 'boolean' || type === 'string') return type
+  const fallback = FWB_SETTINGS_SPEC[String(key)]?.type
+  if (fallback !== undefined) return fallback
+  if (typeof value === 'boolean') return 'boolean'
+  if (typeof value === 'number') return 'number'
+  return 'string'
+}
+
+/** t() returns the key itself when a translation is missing — use it as a probe. */
+function fwbSettingLabel(key, declared) {
+  const probe = `settings.field.${String(key)}`
+  const translated = t(probe)
+  if (translated !== probe) return translated
+  return String(declared?.label ?? key)
+}
+
+function fwbSettingHint(key, declared) {
+  const probe = `settings.hint.${String(key)}`
+  const translated = t(probe)
+  if (translated !== probe) return translated
+  const hint = declared?.hint
+  return hint === undefined || hint === null ? '' : String(hint)
+}
+
+/** One typed control for a setting value. */
+function FwbSettingRow({ name, value, type, onChange, disabled }) {
+  if (type === 'boolean') {
+    return h(Checkbox, {
+      checked: value === true,
+      disabled,
+      onChange: (next) => onChange(fwbReadValue(next) === true),
+      label: String(name),
+    })
+  }
+  if (type === 'number') {
+    return h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+      h(Input, {
+        value: String(value ?? ''),
+        type: 'number',
+        onEnter: null,
+        onChange: (next) => {
+          const raw = fwbReadValue(next)
+          const num = Number(raw)
+          onChange(Number.isFinite(num) ? num : 0)
+        },
+        style: { width: 140 },
+      }))
+  }
+  return h(Input, {
+    value: String(value ?? ''),
+    onChange: (next) => onChange(String(fwbReadValue(next) ?? '')),
+    style: { width: '100%' },
+  })
+}
+
+function SettingsPage({ state, actions }) {
+  const act = fwbActions(state, actions)
+  const { notice, push, clear } = useFwbNotify(state, actions)
+
+  const initial = state?.settings ?? null
+  const [saved, setSaved] = React.useState(initial)
+  const [draft, setDraft] = React.useState(initial)
+  const [descriptor, setDescriptor] = React.useState(null)
+  const [loading, setLoading] = React.useState(initial === null)
+  const [failure, setFailure] = React.useState(null)
+  const [busy, setBusy] = React.useState(false)
+  const [showToken, setShowToken] = React.useState(false)
+
+  const load = React.useCallback(async () => {
+    setLoading(true)
+    setFailure(null)
+    try {
+      const response = await api('/settings')
+      const settings = response?.settings ?? response?.values ?? null
+      setSaved(settings)
+      setDraft(settings)
+      setDescriptor(response?.descriptor ?? response?.spec ?? null)
+    } catch (issue) {
+      setFailure(issue)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    load()
+  }, [load])
+
+  const values = draft ?? saved ?? {}
+  const baseline = saved ?? {}
+  const keys = React.useMemo(() => {
+    const seen = new Set()
+    for (const key of Object.keys(FWB_SETTINGS_SPEC)) seen.add(key)
+    for (const key of Object.keys(values)) seen.add(key)
+    if (descriptor !== null && descriptor !== undefined) for (const key of Object.keys(descriptor)) seen.add(key)
+    return [...seen].sort()
+  }, [values, descriptor])
+
+  const dirtyKeys = keys.filter((key) => {
+    if (key === 'mcpToken') return false
+    const left = values[key]
+    const right = baseline[key]
+    return String(left) !== String(right) || typeof left !== typeof right
+  })
+
+  const setValue = (key) => (next) => setDraft((prev) => ({ ...(prev ?? {}), [key]: next }))
+
+  const save = async () => {
+    const patch = {}
+    for (const key of dirtyKeys) patch[key] = values[key]
+    if (Object.keys(patch).length === 0) {
+      push(t('settings.nothingToSave'), 'info')
+      return
+    }
+    setBusy(true)
+    try {
+      await fwbInvoke(act, 'saveSettings', [patch], () => api('/settings', { method: 'POST', body: { patch } }))
+      push(t('settings.saved'), 'ok')
+      await load()
+    } catch (issue) {
+      push(`${t('settings.saveFailed')}: ${String(issue?.message ?? issue)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const rotate = async () => {
+    setBusy(true)
+    try {
+      const response = await fwbInvoke(act, 'rotateMcpToken', [], () => api('/settings/rotate-token', { method: 'POST', body: {} }))
+      const token = response?.mcpToken ?? response?.settings?.mcpToken ?? response?.token ?? null
+      if (token !== null && token !== undefined) {
+        setDraft((prev) => ({ ...(prev ?? {}), mcpToken: String(token) }))
+        setSaved((prev) => ({ ...(prev ?? {}), mcpToken: String(token) }))
+        setShowToken(true)
+      }
+      push(t('settings.rotated'), 'ok')
+      await load()
+    } catch (issue) {
+      push(`${t('settings.rotateFailed')}: ${String(issue?.message ?? issue)}`, 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const token = String(values.mcpToken ?? '')
+  const mcpUrl = fwbMcpUrl(state)
+  const genericKeys = keys.filter((key) => key !== 'mcpToken')
+
+  const rows = genericKeys.map((key) => {
+    const declared = descriptor !== null && descriptor !== undefined ? descriptor[String(key)] : null
+    const type = fwbSettingType(key, values[key], descriptor)
+    return h('div', {
+      key,
+      style: { display: 'flex', flexDirection: 'column', gap: 2, padding: '7px 0', borderTop: `1px solid ${T.border}` },
+    },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        h('span', { style: { fontSize: 12, fontWeight: 600 } }, fwbSettingLabel(key, declared)),
+        h('span', { style: { color: T.textFaint, fontSize: 10, fontFamily: T.mono } }, String(key)),
+        dirtyKeys.includes(key) === true ? h(Pill, { tone: 'warn', style: { fontSize: 10, color: T.warn } }, t('settings.dirty')) : null),
+      fwbSettingHint(key, declared) === '' ? null : h('div', { style: { color: T.textFaint, fontSize: 11 } }, fwbSettingHint(key, declared)),
+      h('div', { style: { marginTop: 3 } },
+        h(FwbSettingRow, { name: fwbSettingLabel(key, declared), value: values[key], type, onChange: setValue(key), disabled: busy })))
+  })
+
+  if (loading === true && saved === null) {
+    return h(FwbPage, { notice, onDismiss: clear },
+      h('div', { style: { padding: 24, textAlign: 'center', color: T.textDim } }, h(Spinner, null), ` ${t('common.loading')}`))
+  }
+
+  return h(FwbPage, { notice, onDismiss: clear },
+    h('div', {
+      style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: `1px solid ${T.border}`, flexShrink: 0 },
+    },
+      h('strong', null, t('settings.title')),
+      h('div', { style: { flex: 1 } }),
+      h(Btn, { onClick: load, disabled: busy }, t('common.refresh')),
+      h(Btn, { onClick: () => setDraft(saved), disabled: busy || dirtyKeys.length === 0 }, t('settings.reset')),
+      h(Btn, { onClick: save, kind: 'primary', disabled: busy || dirtyKeys.length === 0 },
+        busy === true ? h(Spinner, { size: 12 }) : t('settings.save'))),
+
+    h('div', { style: { flex: 1, minHeight: 0, overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 10 } },
+      failure !== null
+        ? h('div', { style: { color: T.error, fontSize: 12 } }, `${t('settings.loadFailed')}: ${String(failure?.message ?? failure)}`)
+        : null,
+
+      // ---- MCP connection block (endpoint, token, client hints) ----------
+      h(Card, { title: t('settings.mcpTitle'), style: { padding: 10 } },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12 } },
+          h('div', { style: { color: T.textDim } }, t('settings.mcpHint')),
+          h(Field, { label: t('settings.mcpUrl'), hint: t('settings.mcpUrlHint') },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h(Mono, { style: { flex: 1, minWidth: 0, fontSize: 11, overflowWrap: 'anywhere' } }, mcpUrl),
+              h(FwbCopyBtn, { value: mcpUrl, label: t('net.copy'), notify: push }))),
+          h(Field, { label: t('settings.mcpToken'), hint: t('settings.mcpTokenHint') },
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6 } },
+              h(Mono, { style: { flex: 1, minWidth: 160, fontSize: 11, overflowWrap: 'anywhere' } },
+                showToken === true ? (token === '' ? t('settings.noToken') : token) : (token === '' ? t('settings.noToken') : '•'.repeat(Math.min(token.length, 32)))),
+              h(Btn, { onClick: () => setShowToken((value) => value !== true) }, showToken === true ? t('settings.hide') : t('settings.show')),
+              h(FwbCopyBtn, { value: token, label: t('net.copy'), notify: push, disabled: token === '' }),
+              h(Btn, { onClick: rotate, kind: 'danger', disabled: busy }, t('settings.rotate'))),
+            ),
+
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${T.border}`, paddingTop: 8 } },
+            h('div', { style: { color: T.textDim } }, t('settings.connectHint')),
+            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                h('span', { style: { flex: 1, color: T.textFaint, fontSize: 11 } }, t('settings.vscodeLabel')),
+                h(FwbCopyBtn, { value: fwbMcpSnippet(mcpUrl, token, 'vscode'), notify: push })),
+              h(Mono, { style: { fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 150, overflow: 'auto' } }, fwbMcpSnippet(mcpUrl, token, 'vscode'))),
+            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                h('span', { style: { flex: 1, color: T.textFaint, fontSize: 11 } }, t('settings.cursorLabel')),
+                h(FwbCopyBtn, { value: fwbMcpSnippet(mcpUrl, token, 'cursor'), notify: push })),
+              h(Mono, { style: { fontSize: 11, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 150, overflow: 'auto' } }, fwbMcpSnippet(mcpUrl, token, 'cursor')))))),
+
+      // ---- every other setting, typed ------------------------------------
+      h(Card, { title: t('settings.all'), style: { padding: 10 } },
+        rows.length === 0 ? h(Empty, { text: t('settings.empty') }) : h('div', { style: { display: 'flex', flexDirection: 'column' } }, rows)),
+
+      h('div', { style: { color: T.textFaint, fontSize: 11 } }, t('settings.dataDirHint'))))
+}
+
+/* ------------------------------------------------------------- locale -- */
+
+fwbExtendLocale({
+  'quality.tab.analyze': '分析',
+  'quality.tab.test': '测试',
+  'quality.tab.errors': '异常',
+  'quality.tab.perf': '性能',
+  'quality.tab.screenshot': '截图',
+  'quality.severity.error': '错误',
+  'quality.severity.warning': '警告',
+  'quality.severity.info': '提示',
+  'quality.runAnalyze': '运行分析',
+  'quality.analyzing': '分析中…',
+  'quality.analyzeClean': '没有发现任何问题 🎉',
+  'quality.analyzeHint': '对当前项目运行 dart analyze，结果按严重程度分组显示。',
+  'quality.showRaw': '显示原始输出',
+  'quality.hideRaw': '隐藏原始输出',
+  'quality.raw': '原始输出',
+  'quality.runTest': '运行测试',
+  'quality.testing': '测试中…',
+  'quality.testHint': '运行 flutter test，失败用例会带上错误与堆栈。',
+  'quality.testTarget': '测试文件或目录（可选）',
+  'quality.testName': '按用例名过滤（可选）',
+  'quality.passed': '通过',
+  'quality.failed': '失败',
+  'quality.skipped': '跳过',
+  'quality.onlyFailed': '只看失败',
+  'quality.noTests': '没有测试结果',
+  'quality.stack': '堆栈',
+  'quality.context': '上下文',
+  'quality.groupCount': '共 {n} 组',
+  'quality.allKinds': '全部类型',
+  'quality.errorSearch': '搜索异常信息',
+  'quality.errorsEmpty': '还没有捕获到异常',
+  'quality.errorsFailed': '加载异常失败',
+  'quality.firstAt': '首次',
+  'quality.lastAt': '最后',
+  'quality.jobFailed': '任务失败',
+  'quality.noJob': '任务没有返回 id',
+  'quality.running': '执行中…',
+  'quality.noProject': '还没有打开项目',
+  'quality.loadPerf': '拉取帧统计',
+  'quality.perfHint': '从运行中的应用读取帧耗时：build / raster 与掉帧数。',
+  'quality.perfUnavailable': '帧统计接口暂不可用（宿主还没有 /perf 路由）',
+  'quality.frameCount': '帧数',
+  'quality.jankCount': '掉帧',
+  'quality.worstFrame': '最差帧',
+  'quality.worstFrames': '最差帧 TOP 5',
+  'quality.allFrames': '全部帧',
+  'quality.total': '总耗时',
+  'quality.noActiveRun': '当前没有运行中的实例',
+  'quality.capture': '截取当前界面',
+  'quality.shotSaved': '已截图',
+  'quality.shotFailed': '截图失败',
+  'quality.shotHint': '点击「截取当前界面」通过 VM Service 保存一张 PNG。',
+  'quality.shotNoSource': '宿主返回了路径但没有可用的图片源（需要 /file 路由或 base64）',
+  'quality.shotAlt': '应用截图',
+  'quality.copyPath': '复制路径',
+  'quality.openFailed': '无法在编辑器中打开',
+  'quality.pathCopied': '已复制路径:行号',
+  'quality.jumpHint': '在编辑器中打开 {where}',
+  'settings.title': '设置',
+  'settings.all': '全部设置项',
+  'settings.save': '保存',
+  'settings.saved': '已保存',
+  'settings.saveFailed': '保存失败',
+  'settings.reset': '撤销修改',
+  'settings.dirty': '已修改',
+  'settings.nothingToSave': '没有需要保存的修改',
+  'settings.loadFailed': '加载设置失败',
+  'settings.empty': '宿主没有返回任何设置项',
+  'settings.dataDirHint': '这些值由插件保存，覆盖 cordis.patch.yml 里的默认值。',
+  'settings.mcpTitle': 'MCP 连接',
+  'settings.mcpHint': '外部 MCP 客户端（VS Code / Cursor）用下面的 URL 和令牌连接这个工作台。',
+  'settings.mcpUrl': 'MCP 端点',
+  'settings.mcpUrlHint': '请求头带 Authorization: Bearer <令牌>',
+  'settings.mcpToken': '访问令牌',
+  'settings.mcpTokenHint': '只在本机可见；泄露后点「轮换」重新生成',
+  'settings.noToken': '（宿主还没有生成令牌）',
+  'settings.show': '显示',
+  'settings.hide': '隐藏',
+  'settings.rotate': '轮换',
+  'settings.rotated': '令牌已轮换',
+  'settings.rotateFailed': '轮换失败',
+  'settings.connectHint': '把下面的片段粘进客户端的 MCP 配置：',
+  'settings.vscodeLabel': 'VS Code（.vscode/mcp.json）',
+  'settings.cursorLabel': 'Cursor（~/.cursor/mcp.json）',
+  'settings.field.flutterPath': 'Flutter SDK 路径',
+  'settings.field.dartPath': 'Dart SDK 路径',
+  'settings.field.editorCommand': '编辑器命令',
+  'settings.field.dataDir': '数据目录',
+  'settings.field.defaultProvider': 'AI provider',
+  'settings.field.defaultModel': 'AI model',
+  'settings.field.logCapacity': '日志缓冲条数',
+  'settings.field.autoRefreshMs': '面板刷新间隔（毫秒）',
+  'settings.field.networkAutoRefreshMs': '网络日志拉取间隔（毫秒）',
+  'settings.field.maxTaskConcurrency': '同时执行的看板任务数',
+  'settings.field.autoStart': '打开面板时自动启动上次的运行',
+  'settings.field.analysisEnabled': '自动分析保存后的错误',
+  'settings.field.mcpEnabled': '启用 MCP 接口',
+  'settings.hint.flutterPath': '留空则从 PATH 解析 flutter',
+  'settings.hint.dartPath': '留空则从 PATH 解析 dart',
+  'settings.hint.editorCommand': '例如 code 或 code-insiders',
+  'settings.hint.dataDir': '留空使用 ~/.dsh/flutter-workbench',
+  'settings.hint.defaultProvider': '看板派发任务使用；留空用 DSH 默认',
+  'settings.hint.defaultModel': '看板派发任务使用；留空用 DSH 默认',
+  'settings.hint.logCapacity': '200 - 200000',
+  'settings.hint.autoRefreshMs': '500 - 60000',
+  'settings.hint.networkAutoRefreshMs': '500 - 60000',
+  'settings.hint.maxTaskConcurrency': '1 - 8',
+  'settings.hint.autoStart': '不需要手动点运行',
+  'settings.hint.analysisEnabled': '保存文件后自动跑一次分析',
+  'settings.hint.mcpEnabled': '关闭后 /mcp 会拒绝请求',
+}, {
+  'quality.tab.analyze': 'Analyze',
+  'quality.tab.test': 'Tests',
+  'quality.tab.errors': 'Exceptions',
+  'quality.tab.perf': 'Performance',
+  'quality.tab.screenshot': 'Screenshot',
+  'quality.severity.error': 'Error',
+  'quality.severity.warning': 'Warning',
+  'quality.severity.info': 'Info',
+  'quality.runAnalyze': 'Run analyzer',
+  'quality.analyzing': 'Analyzing…',
+  'quality.analyzeClean': 'No issues found 🎉',
+  'quality.analyzeHint': 'Run dart analyze on the active project; issues are grouped by severity.',
+  'quality.showRaw': 'Show raw output',
+  'quality.hideRaw': 'Hide raw output',
+  'quality.raw': 'Raw output',
+  'quality.runTest': 'Run tests',
+  'quality.testing': 'Testing…',
+  'quality.testHint': 'Run flutter test; failing tests include their error and stack.',
+  'quality.testTarget': 'Test file or folder (optional)',
+  'quality.testName': 'Filter by test name (optional)',
+  'quality.passed': 'passed',
+  'quality.failed': 'failed',
+  'quality.skipped': 'skipped',
+  'quality.onlyFailed': 'Failing only',
+  'quality.noTests': 'No test results',
+  'quality.stack': 'Stack',
+  'quality.context': 'Context',
+  'quality.groupCount': '{n} groups',
+  'quality.allKinds': 'All kinds',
+  'quality.errorSearch': 'Search exception messages',
+  'quality.errorsEmpty': 'No exceptions captured yet',
+  'quality.errorsFailed': 'Could not load exceptions',
+  'quality.firstAt': 'first',
+  'quality.lastAt': 'last',
+  'quality.jobFailed': 'Job failed',
+  'quality.noJob': 'The job returned no id',
+  'quality.running': 'Running…',
+  'quality.noProject': 'No project open',
+  'quality.loadPerf': 'Load frame stats',
+  'quality.perfHint': 'Read frame timings from the running app: build / raster and jank count.',
+  'quality.perfUnavailable': 'Frame stats are unavailable (the host has no /perf route yet)',
+  'quality.frameCount': 'frames',
+  'quality.jankCount': 'jank',
+  'quality.worstFrame': 'worst frame',
+  'quality.worstFrames': 'Worst frames (top 5)',
+  'quality.allFrames': 'All frames',
+  'quality.total': 'total',
+  'quality.noActiveRun': 'No live run right now',
+  'quality.capture': 'Capture the screen',
+  'quality.shotSaved': 'Screenshot saved',
+  'quality.shotFailed': 'Screenshot failed',
+  'quality.shotHint': 'Click "Capture the screen" to save a PNG through the VM Service.',
+  'quality.shotNoSource': 'The host returned a path but no readable image source (needs a /file route or base64)',
+  'quality.shotAlt': 'App screenshot',
+  'quality.copyPath': 'Copy path',
+  'quality.openFailed': 'Could not open in the editor',
+  'quality.pathCopied': 'Copied path:line',
+  'quality.jumpHint': 'Open {where} in the editor',
+  'settings.title': 'Settings',
+  'settings.all': 'All settings',
+  'settings.save': 'Save',
+  'settings.saved': 'Saved',
+  'settings.saveFailed': 'Save failed',
+  'settings.reset': 'Revert',
+  'settings.dirty': 'changed',
+  'settings.nothingToSave': 'Nothing to save',
+  'settings.loadFailed': 'Could not load settings',
+  'settings.empty': 'The host returned no settings',
+  'settings.dataDirHint': 'These values are persisted by the plugin and override the cordis.patch.yml defaults.',
+  'settings.mcpTitle': 'MCP connection',
+  'settings.mcpHint': 'Point an external MCP client (VS Code / Cursor) at this workbench with the URL and token below.',
+  'settings.mcpUrl': 'MCP endpoint',
+  'settings.mcpUrlHint': 'Send Authorization: Bearer <token>',
+  'settings.mcpToken': 'Access token',
+  'settings.mcpTokenHint': 'Visible only on this machine; rotate it if it leaks',
+  'settings.noToken': '(the host has not generated a token yet)',
+  'settings.show': 'Show',
+  'settings.hide': 'Hide',
+  'settings.rotate': 'Rotate',
+  'settings.rotated': 'Token rotated',
+  'settings.rotateFailed': 'Rotate failed',
+  'settings.connectHint': 'Paste this snippet into the client MCP config:',
+  'settings.vscodeLabel': 'VS Code (.vscode/mcp.json)',
+  'settings.cursorLabel': 'Cursor (~/.cursor/mcp.json)',
+  'settings.field.flutterPath': 'Flutter SDK path',
+  'settings.field.dartPath': 'Dart SDK path',
+  'settings.field.editorCommand': 'Editor command',
+  'settings.field.dataDir': 'Data directory',
+  'settings.field.defaultProvider': 'AI provider',
+  'settings.field.defaultModel': 'AI model',
+  'settings.field.logCapacity': 'Log buffer size',
+  'settings.field.autoRefreshMs': 'Panel refresh (ms)',
+  'settings.field.networkAutoRefreshMs': 'Network pull interval (ms)',
+  'settings.field.maxTaskConcurrency': 'Concurrent board tasks',
+  'settings.field.autoStart': 'Auto-start the last run when the panel opens',
+  'settings.field.analysisEnabled': 'Analyze automatically after a save',
+  'settings.field.mcpEnabled': 'Enable the MCP endpoint',
+  'settings.hint.flutterPath': 'empty → resolve flutter from PATH',
+  'settings.hint.dartPath': 'empty → resolve dart from PATH',
+  'settings.hint.editorCommand': 'e.g. code or code-insiders',
+  'settings.hint.dataDir': 'empty → ~/.dsh/flutter-workbench',
+  'settings.hint.defaultProvider': 'used for board dispatch; empty → DSH default',
+  'settings.hint.defaultModel': 'used for board dispatch; empty → DSH default',
+  'settings.hint.logCapacity': '200 - 200000',
+  'settings.hint.autoRefreshMs': '500 - 60000',
+  'settings.hint.networkAutoRefreshMs': '500 - 60000',
+  'settings.hint.maxTaskConcurrency': '1 - 8',
+  'settings.hint.autoStart': 'no manual run needed',
+  'settings.hint.analysisEnabled': 'run the analyzer after each save',
+  'settings.hint.mcpEnabled': '/mcp rejects requests while disabled',
+})
 
     /* ==== 90-apply.js ==== */
 /* ====================================================================== *

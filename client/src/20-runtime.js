@@ -497,7 +497,6 @@ function useApiState() {
     /* settings + editor + ui */
     saveSettings,
     openFile,
-    markLogAlreadyNamed: markLog,
     toast,
     dismissToast,
     refreshAll,
@@ -548,7 +547,7 @@ function useApiState() {
  * Seed the run draft from freshly loaded configs. Keeps the user's picks when
  * the same project is reloaded and the chosen config still exists.
  */
-function seedDraft(previous, loaded, ) {
+function seedDraft(previous, loaded) {
   const configs = loaded?.configs ?? []
   const devices = loaded?.devices ?? []
   const sameProject = previous.projectId === loaded?.projectId

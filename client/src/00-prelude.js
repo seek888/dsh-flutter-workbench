@@ -1653,6 +1653,7 @@ const ICONS = {
   pause: ['M6 4v8M10 4v8'],
   camera: ['M3 5.5h2.2L6.5 4h3L10.8 5.5H13V13H3z', 'M8 7.4a2.2 2.2 0 100 4.4 2.2 2.2 0 000-4.4z'],
   code: ['M5.5 4L2 8l3.5 4M10.5 4L14 8l-3.5 4'],
+  download: ['M8 3v7.5M4.5 7.5L8 11l3.5-3.5', 'M3.5 13h9'],
   file: ['M4 2.5h5l3 3v8H4z', 'M9 2.5v3h3'],
 }
 
@@ -1801,7 +1802,7 @@ function Pill(props) {
       ...(props.style ?? {}),
     },
   },
-    props.dot === true ? h('span', { style: { width: 6, height: 6, borderRadius: 6, background: 'currentColor', flex: 'none' } }) : null,
+    props.dot === true ? h('span', { style: { width: 6, height: 6, borderRadius: T.radiusSm, background: 'currentColor', flex: 'none' } }) : null,
     props.children)
 }
 
@@ -2175,7 +2176,7 @@ function ToastHost(props) {
         fontSize: T.fsSm,
       },
     },
-      h('span', { style: { width: 6, height: 6, borderRadius: 6, background: colors.fg, marginTop: 6, flex: 'none' } }),
+      h('span', { style: { width: 6, height: 6, borderRadius: T.radiusSm, background: colors.fg, marginTop: 6, flex: 'none' } }),
       h('div', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word' } }, toast.message),
       props.onDismiss !== undefined
         ? h(IconBtn, { icon: 'x', size: 20, title: t('common.close'), onClick: () => props.onDismiss(toast.id) })
@@ -2220,7 +2221,7 @@ function Spinner(props) {
       display: 'inline-block',
       width: size,
       height: size,
-      borderRadius: size,
+      borderRadius: T.radiusSm,
       border: `2px solid ${T.border}`,
       borderTopColor: props.color ?? T.brand,
       animation: 'fwb-spin 0.8s linear infinite',
@@ -2454,7 +2455,7 @@ function ProgressBar(props) {
     style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, ...(props.style ?? {}) },
   },
     h('div', {
-      style: { height: props.height ?? 6, borderRadius: 4, background: T.l2, overflow: 'hidden' },
+      style: { height: props.height ?? 6, borderRadius: T.radiusXs, background: T.l2, overflow: 'hidden' },
     }, h('div', { style: { width: `${pct * 100}%`, height: '100%', background: colors.fg, transition: 'width 120ms linear' } })),
     props.label === undefined ? null : h('div', { style: { fontSize: T.fsXs, color: T.textFaint } }, props.label))
 }
@@ -2474,7 +2475,7 @@ function Badge(props) {
       minWidth: 16,
       height: 16,
       padding: '0 4px',
-      borderRadius: 8,
+      borderRadius: T.radiusSm,
       background: colors.bg,
       color: colors.fg,
       fontSize: 10,
