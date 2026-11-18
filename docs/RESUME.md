@@ -1,4 +1,4 @@
-﻿# RESUME — what is left, in order
+# RESUME — what is left, in order
 
 Read this before any work. `docs/CONTRACTS.md` is the architecture contract and
 `docs/CONTRACTS-AMENDMENTS.md` overrides it wherever they disagree.

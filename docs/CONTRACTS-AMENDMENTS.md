@@ -1,4 +1,4 @@
-﻿# CONTRACTS amendments (verified on this host)
+# CONTRACTS amendments (verified on this host)
 
 Evidence: `docs/research/flutter-internals.md` §5 (Flutter 3.38.5 / Dart 3.10.4,
 `-d windows`). These override the corresponding sentences in `docs/CONTRACTS.md`.

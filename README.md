@@ -1,4 +1,4 @@
-﻿# dsh-flutter-workbench
+# dsh-flutter-workbench
 
 A Flutter client-dev workbench as a DeepSeek Harness plugin: one full-page panel
 that runs your project, hot reloads it, streams the logs, inspects HTTP traffic
