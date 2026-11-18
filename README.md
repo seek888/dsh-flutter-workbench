@@ -25,16 +25,13 @@ tools and as an HTTP MCP server.
 > runtime (44 KB), logs (27 KB), network (35 KB), board (65 KB),
 > quality+settings (55 KB). `client/client.js` builds to 353 KB and parses.
 >
-> **Still stubbed — the VM-service layer:** `host/ws.js`,
-> `host/vmservice.js`, `host/network.js`, `host/errors.js`. Until those land,
-> run/hot-reload/logs/analyze/test/board all work, but the network inspector,
-> screenshots, widget-tree dump, frame stats and exception de-duplication do not
-> (they depend on the Dart VM Service socket). Read
-> `docs/CONTRACTS-AMENDMENTS.md` before writing them: five of its ten corrections
-> change method names and call sequences.
+> The VM-service layer is in: `ws.js` (dependency-free RFC 6455), `vmservice.js`
+> (handshake, streams, reconnect, HTTP profile, inspector screenshot, frame
+> stats), `network.js`, `errors.js` — verified against a real Dart 3.10.4 VM
+> service (196 HTTP entries mapped, real bodies, honest truncation).
 >
-> Tests: `node --test test/board.test.mjs` 29/29, `test/tools.test.mjs` 6/6,
-> `test/mcp.test.mjs` 16/16 (51 total, all offline).
+> Tests: `npm test` (node --test auto-discovery) → **94/94 passing, all offline** —
+> board 29, vmservice 13, ws 10, network 10, errors 10, mcp 16, tools 6.
 >
 > The development run hit the account's token rate limit before the parallel
 > authors could land their modules. The task graph, per-module contracts and

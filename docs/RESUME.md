@@ -22,15 +22,11 @@ parses.
 Tests: 51 offline, all passing — `node --test test/board.test.mjs` 29,
 `test/tools.test.mjs` 6, `test/mcp.test.mjs` 16.
 
-## The one remaining engineering task (blocker for QA sign-off)
+## VM layer — DONE (t3 attempt 2). 43 new tests, live-verified against a real Dart VM service.
+## The one remaining task (blocker for QA sign-off)
 
-`host/ws.js`, `host/vmservice.js`, `host/network.js`, `host/errors.js` are still
-stubs. Everything that depends on the Dart VM Service is therefore dead:
-network inspector data, screenshots, widget-tree dump, frame stats, exception
-de-duplication, and the `flutter_network*`, `flutter_screenshot`,
-`flutter_widget_tree`, `flutter_perf`, `flutter_errors` tools.
-
-Implement them to `docs/CONTRACTS.md` §5.4/§5.5, with these corrections from
+Only real QA and `POST /logs/mark` remain. The VM layer already implements these
+corrections (kept here as the record of what the SDK actually does, differing from
 `CONTRACTS-AMENDMENTS.md` that change method names and call order:
 
 1. Screenshot = `ext.flutter.inspector.getRootWidgetSummaryTree{objectGroup}` →

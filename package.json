@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "dsh-flutter-workbench",
   "version": "0.1.0",
   "private": false,
@@ -42,7 +42,7 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "check": "node --check index.js && node scripts/check-all.mjs",
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "dsh": {
     "bundle": {
