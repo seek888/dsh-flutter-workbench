@@ -587,6 +587,7 @@ export function createHttpApi(options = {}) {
           runner: available('runner'),
           vm: available('vmservice', 'vm'),
           board: available('board'),
+          taskboard: available('taskboard'),
           toolchain: available('toolchain'),
           mcp: available('mcp'),
         },
@@ -1026,6 +1027,58 @@ export function createHttpApi(options = {}) {
       ...(text(payload.model) === undefined ? {} : { model: text(payload.model) }),
     }))
     return { status: 200, headers: {}, body: { ok: true, jobId: job.id, status: job.status } }
+  })
+
+  // ------------------------------------------------------------- taskboard
+  // The ported task board, driven by the panel (a real user, so `done` is
+  // allowed) instead of an agent tool call.
+  route('GET', '/taskboard', async () => {
+    const board = require('taskboard')
+    const snapshot = board.snapshot()
+    return { status: 200, headers: {}, body: { ok: true, revision: snapshot.revision, lanes: board.lanes(), tasks: snapshot.tasks } }
+  })
+
+  route('GET', '/taskboard/task', async ({ query }) => {
+    const id = query.text('id')
+    if (id === undefined) throw badRequest('id is required')
+    return { status: 200, headers: {}, body: { ok: true, ...require('taskboard').get(id) } }
+  })
+
+  route('POST', '/taskboard/task', async ({ body }) => {
+    const board = require('taskboard')
+    const payload = isPlainObject(body) ? body : {}
+    const action = text(payload.action)
+    if (action === undefined) throw badRequest('action is required')
+    const actor = 'user'
+    const asUser = { actor, actorKind: 'user' }
+    if (action === 'create') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.create(payload, asUser) } }
+    }
+    if (action === 'update') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.update({ id: text(payload.id), ifVersion: payload.ifVersion, patch: isPlainObject(payload.patch) ? payload.patch : payload }, asUser) } }
+    }
+    if (action === 'move') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.move({ id: text(payload.id), status: text(payload.status), ifVersion: payload.ifVersion, archiveSessions: payload.archiveSessions === true }, asUser) } }
+    }
+    if (action === 'delete') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.remove({ id: text(payload.id), ifVersion: payload.ifVersion }) } }
+    }
+    if (action === 'checklist') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.checklist({ id: text(payload.id), action: text(payload.checkAction) ?? text(payload.op), ifVersion: payload.ifVersion, items: payload.items, itemId: text(payload.itemId), note: text(payload.note) }, asUser) } }
+    }
+    if (action === 'comment') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.commentAdd({ id: text(payload.id), body: text(payload.body) }, asUser) } }
+    }
+    if (action === 'comments') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.comments(text(payload.id)) } }
+    }
+    if (action === 'start') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.startExecution({ id: text(payload.id), ifVersion: payload.ifVersion }, { sessionId: null }) } }
+    }
+    if (action === 'finish') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.finishExecution({ id: text(payload.id), outcome: text(payload.outcome) }, { sessionId: null }) } }
+    }
+    throw badRequest(`unknown action ${action}`)
   })
 
   route('POST', '/board/dispatch', async ({ body }) => {

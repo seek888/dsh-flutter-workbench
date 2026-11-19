@@ -17,6 +17,7 @@ import { createRunner } from './host/runner.js'
 import { createSettings } from './host/settings.js'
 import { createStore } from './host/store.js'
 import { createToolchain } from './host/analyze.js'
+import { createTaskboard } from './host/taskboard.js'
 import { registerTools } from './host/tools.js'
 import { createVmService } from './host/vmservice.js'
 import { createBus, createLogger, normalizeError, nowMs } from './host/util.js'
@@ -77,6 +78,9 @@ export function apply(ctx, config) {
     const errors = await build('errors', () => createErrorStore({ logs, bus, logger }))
     const board = await build('board', () => createBoard({ store, bus, ctx, logs, settings, logger }))
     const toolchain = await build('toolchain', () => createToolchain({ settings, logs, bus, logger }))
+    // The task board: a port of dsh-taskboard's ledger, so this one plugin owns
+    // both the Flutter toolchain and the agent task board.
+    const taskboard = await build('taskboard', () => createTaskboard({ store, bus, ctx, logs, settings, logger }))
 
     const services = {
       ctx,
@@ -92,6 +96,7 @@ export function apply(ctx, config) {
       errors,
       board,
       toolchain,
+      taskboard,
       version: VERSION,
       bootedAt,
       warnings,
@@ -164,6 +169,11 @@ export function apply(ctx, config) {
       }
       await runner?.dispose?.().catch?.(() => {})
       await vm?.dispose?.().catch?.(() => {})
+      try {
+        await taskboard?.dispose?.()
+      } catch {
+        /* ledger flush is best effort */
+      }
       await store?.flush?.().catch?.(() => {})
     }
   })

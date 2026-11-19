@@ -12,6 +12,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { clamp, normalizeError, truncate, uid } from './util.js'
 import { resolveDataDir } from './store.js'
+import { createTaskboardToolDefinitions } from './taskboard-tools.js'
 
 const text = (value) => [{ type: 'text', text: String(value) }]
 
@@ -890,6 +891,13 @@ export function createToolDefinitions({ services, logger } = {}) {
     },
   })
 
+  // The ported task-board surface rides in the same registry, so the agent and
+  // the MCP endpoint both get it with no second wiring.
+  try {
+    definitions.push(...createTaskboardToolDefinitions({ services }))
+  } catch (error) {
+    logger?.warn?.(`tools: taskboard definitions unavailable: ${normalizeError(error).message}`)
+  }
   return definitions
 }
 
