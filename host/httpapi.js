@@ -994,6 +994,40 @@ export function createHttpApi(options = {}) {
     return { status: 200, headers: {}, body: { ok: true, tasks: Array.isArray(result?.tasks) ? result.tasks : [] } }
   })
 
+  route('POST', '/board/plan', async ({ body }) => {
+    // One sentence in, a whole board out — as a background job so the panel
+    // never blocks for the minute an agent needs to think.
+    const payload = isPlainObject(body) ? body : {}
+    const prompt = text(payload.prompt)
+    if (prompt === undefined) throw badRequest('prompt is required')
+    const board = require('board')
+    const job = startJob('board.plan', () => board.decompose({
+      prompt,
+      projectId: text(payload.projectId),
+      ...(payload.maxTasks === undefined ? {} : { maxTasks: intOf(payload.maxTasks, 6, { min: 1, max: 50 }) }),
+      ...(text(payload.provider) === undefined ? {} : { provider: text(payload.provider) }),
+      ...(text(payload.model) === undefined ? {} : { model: text(payload.model) }),
+    }))
+    return { status: 200, headers: {}, body: { ok: true, jobId: job.id, status: job.status } }
+  })
+
+  route('POST', '/board/refine', async ({ body }) => {
+    // The AI rewrites one card's fields; also a job because a model turn is slow.
+    const payload = isPlainObject(body) ? body : {}
+    const id = text(payload.id)
+    if (id === undefined) throw badRequest('id is required')
+    const prompt = text(payload.prompt)
+    if (prompt === undefined) throw badRequest('prompt is required')
+    const board = require('board')
+    const job = startJob('board.refine', () => board.refine({
+      id,
+      prompt,
+      ...(text(payload.provider) === undefined ? {} : { provider: text(payload.provider) }),
+      ...(text(payload.model) === undefined ? {} : { model: text(payload.model) }),
+    }))
+    return { status: 200, headers: {}, body: { ok: true, jobId: job.id, status: job.status } }
+  })
+
   route('POST', '/board/dispatch', async ({ body }) => {
     const payload = isPlainObject(body) ? body : {}
     const id = text(payload.id)

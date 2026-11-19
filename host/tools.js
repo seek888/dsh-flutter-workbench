@@ -26,6 +26,12 @@ function fail(code, message) {
   throw Object.assign(new Error(message), { code })
 }
 
+/** Optional string argument: undefined means "let the host pick the default". */
+function cleanProvider(value) {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  return raw === '' ? undefined : raw
+}
+
 function requireService(service, label) {
   if (service === undefined || service === null) fail('unavailable', `${label} 服务不可用（插件子系统未启动）`)
   return service
@@ -723,6 +729,87 @@ export function createToolDefinitions({ services, logger } = {}) {
         model: settings?.get?.().defaultModel || undefined,
       })
       return { ok: (result.tasks ?? []).length > 0, ...result }
+    },
+  })
+
+  add({
+    name: 'flutter_board_plan',
+    description:
+      '一句话建看板：把用户随口说的一句话交给 AI，直接在后台拆成多张卡片（含标题、详情、验收标准、验证命令、依赖、优先级），不需要人手动点。返回新建的卡片。适合"帮我做一个 XX 页面"这类输入。',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string', description: '用户原话或需求描述，越具体拆得越准' },
+        projectId: { type: 'string', description: '项目 id，省略用当前活动项目' },
+        maxTasks: { type: 'number', description: '最多拆几张，默认 6' },
+        provider: { type: 'string', description: '可选：模型 provider' },
+        model: { type: 'string', description: '可选：模型' },
+      },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: looseSchema({ tasks: { type: 'array', items: { type: 'object' } } }),
+      render: (args, value) => {
+        const tasks = value?.tasks ?? []
+        if (tasks.length === 0) return text(`没有建出卡片${value?.error ? `：${value.error.message ?? value.error.code}` : ''}`)
+        const lines = [`已建 ${tasks.length} 张卡片：`]
+        for (const task of tasks) {
+          lines.push(`- [${task.lane}] ${task.title}${(task.acceptance ?? []).length > 0 ? `（验收 ${task.acceptance.length} 条）` : ''}`)
+        }
+        return text(lines.join('\n'))
+      },
+    },
+    async execute(args) {
+      const service = requireService(board, 'board')
+      const project = args?.projectId ? projects?.get?.(String(args.projectId)) : projects?.active?.()
+      const result = await service.decompose({
+        prompt: String(args?.prompt ?? ''),
+        projectId: project?.id ?? null,
+        maxTasks: clamp(args?.maxTasks ?? 6, 1, 24),
+        provider: cleanProvider(args?.provider),
+        model: cleanProvider(args?.model),
+      })
+      return { ok: (result.tasks ?? []).length > 0, ...result }
+    },
+  })
+
+  add({
+    name: 'flutter_task_refine',
+    description:
+      '让 AI 改写一张已有卡片的内容：给它一句话（如"补上验收标准""改成高优先级""把验证命令写全"），它会自己填/改标题、详情、验收标准、验证命令、文件、标签、优先级或泳道。',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '卡片 id' },
+        prompt: { type: 'string', description: '一句话说明要改什么' },
+        provider: { type: 'string', description: '可选：模型 provider' },
+        model: { type: 'string', description: '可选：模型' },
+      },
+      required: ['id', 'prompt'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: looseSchema({ task: { type: 'object' } }),
+      render: (args, value) => {
+        const task = value?.task
+        if (task === null || task === undefined) return text(`没有改成（${value?.error?.message ?? '未知原因'}）`)
+        return text([
+          `卡片已更新：${task.title}`,
+          `泳道 ${task.lane} · 优先级 ${task.priority}`,
+          `验收 ${(task.acceptance ?? []).length} 条 · 验证命令 ${(task.verify ?? []).length} 条`,
+        ].join('\n'))
+      },
+    },
+    async execute(args) {
+      const service = requireService(board, 'board')
+      const result = await service.refine({
+        id: String(args?.id ?? ''),
+        prompt: String(args?.prompt ?? ''),
+        provider: cleanProvider(args?.provider),
+        model: cleanProvider(args?.model),
+      })
+      return { ok: result.error === undefined, ...result }
     },
   })
 

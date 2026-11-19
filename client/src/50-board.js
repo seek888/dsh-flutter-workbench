@@ -770,6 +770,61 @@ function BoardPage({ state, actions }) {
   // ---- mutation plumbing ------------------------------------------------
   const refresh = live.refresh
 
+  // ---- one-sentence board planning (AI creates cards in the background) ---
+  const [planPrompt, setPlanPrompt] = React.useState('')
+  const [planJob, setPlanJob] = React.useState(null)
+
+  const startPlan = async () => {
+    const sentence = String(planPrompt ?? '').trim()
+    if (sentence === '') {
+      push(t('board.planNeedPrompt'), 'warn')
+      return
+    }
+    try {
+      // The route answers with a job id immediately; the agent works behind it.
+      const response = await api('/board/plan', {
+        method: 'POST',
+        body: {
+          prompt: sentence,
+          ...(filters.projectId === '' ? {} : { projectId: filters.projectId }),
+          maxTasks: 6,
+        },
+      })
+      setPlanPrompt('')
+      setPlanJob({ id: String(response?.jobId ?? ''), status: 'running', cards: [] })
+    } catch (error) {
+      push(`${t('board.planFailed')}: ${String(error?.message ?? error)}`, 'error')
+    }
+  }
+
+  React.useEffect(() => {
+    const jobId = planJob?.id
+    if (typeof jobId !== 'string' || jobId === '' || planJob?.status !== 'running') return undefined
+    let cancelled = false
+    const timer = setInterval(async () => {
+      try {
+        const response = await api('/job', { query: { id: jobId } })
+        const job = response?.job
+        if (cancelled || job === null || job === undefined) return
+        if (job.status === 'done') {
+          const cards = Array.isArray(job.result?.tasks) ? job.result.tasks : []
+          setPlanJob({ id: jobId, status: 'done', cards })
+          push(t('board.planCreated', { n: cards.length }), cards.length > 0 ? 'ok' : 'warn')
+          await refresh()
+        } else if (job.status === 'failed') {
+          setPlanJob({ id: jobId, status: 'failed', cards: [] })
+          push(`${t('board.planFailed')}: ${String(job.error?.message ?? '')}`, 'error')
+        }
+      } catch {
+        /* a poll that fails must not stop the loop */
+      }
+    }, 1200)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [planJob, refresh, push])
+
   const performMove = async (task, lane, index, force) => {
     setOverrides({ id: task.id, lane, index })
     try {
@@ -1058,8 +1113,37 @@ function BoardPage({ state, actions }) {
             }))))
     }))
 
+  const planBar = h('div', {
+    style: {
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '6px 10px',
+      borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+    },
+  },
+    h('span', { style: { color: T.brand, fontSize: 13 }, title: t('board.planHint') }, '✨'),
+    h('div', { style: { flex: 1, minWidth: 220 } },
+      h(Input, {
+        value: planPrompt,
+        onChange: (next) => setPlanPrompt(String(fwbReadValue(next) ?? '')),
+        onKeyDown: (event) => {
+          if (event?.key === 'Enter') {
+            event.preventDefault()
+            startPlan()
+          }
+        },
+        placeholder: t('board.planPlaceholder'),
+        style: { width: '100%' },
+      })),
+    h(Btn, { kind: 'primary', onClick: startPlan, disabled: planJob?.status === 'running' },
+      planJob?.status === 'running' ? t('board.planRunning') : t('board.planSubmit')),
+    planJob?.status === 'done'
+      ? h(Pill, { tone: (planJob.cards ?? []).length > 0 ? 'ok' : 'warn' }, t('board.planCreated', { n: (planJob.cards ?? []).length }))
+      : null,
+    planJob?.status === 'failed' ? h(Pill, { tone: 'error' }, t('board.planFailed')) : null,
+    h('span', { style: { color: T.textFaint, fontSize: 11 } }, t('board.planHint')))
+
   return h(FwbPage, { notice, onDismiss: clear },
     header,
+    planBar,
     strip,
     live.error !== null
       ? h('div', { style: { padding: '6px 10px', color: T.error, fontSize: 12, borderBottom: `1px solid ${T.border}` } },

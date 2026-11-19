@@ -1022,6 +1022,127 @@ export function createBoard({ store, bus, ctx, logs, settings, logger } = {}) {
     return { tasks: created.map(cloneTask), raw }
   }
 
+  /** Fields the AI may rewrite on an existing card. */
+  const REFINE_FIELDS = ['title', 'detail', 'acceptance', 'verify', 'files', 'tags', 'priority', 'lane']
+
+  function buildRefinePrompt(task, instruction) {
+    const current = {
+      title: task.title,
+      detail: task.detail,
+      acceptance: task.acceptance,
+      verify: task.verify,
+      files: task.files,
+      tags: task.tags,
+      priority: task.priority,
+      lane: task.lane,
+    }
+    return [
+      'You are keeping one card of a Flutter developer kanban board up to date.',
+      '',
+      'The user said:',
+      '"""',
+      instruction,
+      '"""',
+      '',
+      'Current card (JSON):',
+      JSON.stringify(current, null, 2),
+      '',
+      'Rewrite ONLY the fields the instruction actually changes; leave every other',
+      'field out of your answer so it keeps its value.',
+      `Rewritable fields: ${REFINE_FIELDS.join(', ')}.`,
+      'Rules:',
+      '- "acceptance": concrete, checkable criteria (one per string).',
+      '- "verify": shell commands that prove the card, e.g. "flutter analyze".',
+      '- "files": project-relative paths the card touches.',
+      '- "priority": one of low | normal | high | urgent.',
+      '- "lane": only if the user explicitly asks to move the card.',
+      '',
+      'Answer with STRICT JSON only, no prose and no fences:',
+      '{"patch":{"title":"...","acceptance":["..."]}}',
+    ].join('\n')
+  }
+
+  /** Pick a patch out of whatever the agent answered, or null. */
+  function extractPatch(raw) {
+    const extracted = extractJson(typeof raw === 'string' ? raw : '')
+    if (extracted.value === undefined) return null
+    const value = extracted.value
+    if (value !== null && typeof value === 'object' && Array.isArray(value) === false) {
+      const nested = value.patch ?? value.fields ?? value.card
+      if (nested !== null && typeof nested === 'object' && Array.isArray(nested) === false) return nested
+      return value
+    }
+    return null
+  }
+
+  /** Coerce one agent patch into the updateTask whitelist. */
+  function sanitizeRefinePatch(raw) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const patch = {}
+    if (typeof raw.title === 'string' && cleanText(raw.title, 200) !== '') patch.title = cleanText(raw.title, 200)
+    if (typeof raw.detail === 'string') patch.detail = cleanText(raw.detail, 20000)
+    if (raw.acceptance !== undefined) patch.acceptance = cleanList(raw.acceptance, 40)
+    if (raw.verify !== undefined) patch.verify = cleanList(raw.verify, 40)
+    if (raw.files !== undefined) patch.files = cleanList(raw.files, 200)
+    if (raw.tags !== undefined) patch.tags = cleanList(raw.tags, 40)
+    if (raw.priority !== undefined) patch.priority = coercePriority(raw.priority)
+    if (typeof raw.lane === 'string' && LANE_IDS.includes(cleanText(raw.lane, 40))) patch.lane = cleanText(raw.lane, 40)
+    for (const key of Object.keys(patch)) if (REFINE_FIELDS.includes(key) === false) delete patch[key]
+    return patch
+  }
+
+  /**
+   * Let an agent rewrite one card's fields from a one-sentence instruction.
+   * Returns the updated task; never throws for agent problems.
+   */
+  async function refine(input) {
+    const task = requireTask(input?.id)
+    const instruction = cleanText(input?.prompt, 8000)
+    if (instruction === '') return { task: cloneTask(task), raw: '', error: { code: 'invalid-input', message: 'prompt is required' } }
+    const agents = safeService('agents')
+    if (agents === null || typeof agents.create !== 'function') {
+      return { task: cloneTask(task), raw: '', error: { code: 'agents-unavailable', message: 'ctx.get("agents") is unavailable' } }
+    }
+    const values = settingsValues()
+    const provider = cleanText(input?.provider, 120) === '' ? cleanText(values.defaultProvider, 120) : cleanText(input.provider, 120)
+    const model = cleanText(input?.model, 160) === '' ? cleanText(values.defaultModel, 160) : cleanText(input.model, 160)
+    const cwd = resolveProjectPath({ projectId: task.projectId, cwd: input?.cwd })
+    const timeoutMs = clamp(input?.timeoutMs ?? DEFAULT_DECOMPOSE_TIMEOUT_MS, 5000, 600000)
+    const sessionId = uid('fwb-refine')
+    const agentOptions = {}
+    if (provider !== '') agentOptions.provider = provider
+    if (model !== '') agentOptions.model = model
+    let handle = null
+    let raw = ''
+    try {
+      handle = await agents.create({ sessionId, meta: { cwd }, agentOptions })
+      if (handle?.agent === undefined || handle.agent === null) throw fail('agents-unavailable', 'agents.create returned no agent handle')
+      await handle.agent.followup({ content: [{ type: 'text', text: buildRefinePrompt(task, instruction) }], source: messageSource() })
+      await waitForIdle(handle.agent, timeoutMs)
+      raw = lastAssistantText(handle.agent)
+    } catch (error) {
+      const detail = normalizeError(error)
+      note('warn', `board: refine failed: ${detail.message}`)
+      return { task: cloneTask(task), raw, error: { code: detail.code, message: detail.message } }
+    } finally {
+      if (handle !== null && typeof handle.dispose === 'function') {
+        try {
+          await handle.dispose()
+        } catch {
+          /* ephemeral */
+        }
+      }
+    }
+    const patch = sanitizeRefinePatch(extractPatch(raw))
+    if (Object.keys(patch).length === 0) {
+      note('warn', 'board: refine returned no usable fields')
+      return { task: cloneTask(task), raw, error: { code: 'parse-failed', message: 'the agent reply contained no usable fields' } }
+    }
+    const updated = updateTask({ id: task.id, patch, note: `AI 改写：${instruction.slice(0, 80)}` })
+    note('info', `board: card ${task.id} rewritten by AI (${Object.keys(patch).join(', ')})`)
+    return { task: updated, raw }
+  }
+
   async function dispatch(input) {
     const task = requireTask(input?.id)
     if (task.agent !== null && task.agent.sessionId !== null && task.agent.status === 'working') {
@@ -1261,6 +1382,7 @@ export function createBoard({ store, bus, ctx, logs, settings, logger } = {}) {
     deleteTask: removeTask,
     archiveDone,
     decompose,
+    refine,
     dispatch,
     report,
     syncAgent,
