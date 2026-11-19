@@ -18,6 +18,7 @@ import { createSettings } from './host/settings.js'
 import { createStore } from './host/store.js'
 import { createToolchain } from './host/analyze.js'
 import { createTaskboard } from './host/taskboard.js'
+import { createScheduler } from './host/scheduler.js'
 import { registerTools } from './host/tools.js'
 import { createVmService } from './host/vmservice.js'
 import { createBus, createLogger, normalizeError, nowMs } from './host/util.js'
@@ -81,6 +82,19 @@ export function apply(ctx, config) {
     // The task board: a port of dsh-taskboard's ledger, so this one plugin owns
     // both the Flutter toolchain and the agent task board.
     const taskboard = await build('taskboard', () => createTaskboard({ store, bus, ctx, logs, settings, logger }))
+    // Host-side timer: scheduled cards fire with the browser closed.
+    const scheduler = await build('scheduler', () => {
+      const created = createScheduler({
+        taskboard,
+        logs,
+        bus,
+        logger,
+        intervalMs: Number(resolved.schedulerIntervalMs ?? 20000),
+        execute: (id) => taskboard.executeTask({ id, isolation: 'worktree' }, { actor: 'scheduler' }),
+      })
+      if (resolved.schedulerEnabled !== false) created.start()
+      return created
+    })
 
     const services = {
       ctx,
@@ -97,6 +111,7 @@ export function apply(ctx, config) {
       board,
       toolchain,
       taskboard,
+      scheduler,
       version: VERSION,
       bootedAt,
       warnings,
@@ -173,6 +188,11 @@ export function apply(ctx, config) {
         await taskboard?.dispose?.()
       } catch {
         /* ledger flush is best effort */
+      }
+      try {
+        scheduler?.dispose?.()
+      } catch {
+        /* timer teardown is best effort */
       }
       await store?.flush?.().catch?.(() => {})
     }

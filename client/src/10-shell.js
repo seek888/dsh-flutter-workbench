@@ -17,7 +17,7 @@ const FWB_PAGES = [
   { id: 'runtime', labelKey: 'nav.runtime', icon: 'runtime', badge: null },
   { id: 'logs', labelKey: 'nav.logs', icon: 'logs', badge: 'logs' },
   { id: 'network', labelKey: 'nav.network', icon: 'network', badge: 'network' },
-  { id: 'board', labelKey: 'nav.board', icon: 'board', badge: 'tasks' },
+  { id: 'taskboard', labelKey: 'nav.taskboard', icon: 'board', badge: 'tasks' },
   { id: 'quality', labelKey: 'nav.quality', icon: 'quality', badge: 'errors' },
   { id: 'settings', labelKey: 'nav.settings', icon: 'gear', badge: null },
 ]
@@ -31,7 +31,8 @@ const FWB_PAGE_COMPONENTS = {
   runtime: () => (typeof RuntimePage === 'function' ? RuntimePage : null),
   logs: () => (typeof LogsPage === 'function' ? LogsPage : null),
   network: () => (typeof NetworkPage === 'function' ? NetworkPage : null),
-  board: () => (typeof BoardPage === 'function' ? BoardPage : null),
+  board: () => (typeof TaskboardPage === 'function' ? TaskboardPage : typeof BoardPage === 'function' ? BoardPage : null),
+  taskboard: () => (typeof TaskboardPage === 'function' ? TaskboardPage : null),
   quality: () => (typeof QualityPage === 'function' ? QualityPage : null),
   settings: () => (typeof SettingsPage === 'function' ? SettingsPage : null),
 }

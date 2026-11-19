@@ -24,6 +24,9 @@ export const SETTING_SPEC = {
   maxTaskConcurrency: { type: 'number', default: 1, label: '同时执行的看板任务数' },
   analysisEnabled: { type: 'boolean', default: true, label: '自动分析保存后的错误' },
   mcpEnabled: { type: 'boolean', default: true, label: '启用 MCP 接口' },
+  schedulerEnabled: { type: 'boolean', default: true, label: '启用看板定时器', hint: '关闭后 cron/定时任务不再触发' },
+  schedulerIntervalMs: { type: 'number', default: 20000, label: '定时器扫描间隔（毫秒）' },
+  taskIsolation: { type: 'string', default: 'none', label: '默认执行隔离', hint: 'none = 直接在项目目录跑；worktree = 每个任务独立 git worktree' },
 }
 
 const NUMBER_LIMITS = {
@@ -31,6 +34,7 @@ const NUMBER_LIMITS = {
   autoRefreshMs: [500, 60000],
   networkAutoRefreshMs: [500, 60000],
   maxTaskConcurrency: [1, 8],
+  schedulerIntervalMs: [2000, 600000],
 }
 
 function coerce(key, value, spec) {

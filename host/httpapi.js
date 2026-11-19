@@ -624,6 +624,15 @@ export function createHttpApi(options = {}) {
           network: { total: Number(networkTotal) || 0 },
           errors: { total: Number(errorTotal) || 0 },
           jobs: jobs.size,
+          tasks: (() => {
+            try {
+              const board = lookup('taskboard')
+              if (board === null || typeof board.snapshot !== 'function') return 0
+              return board.snapshot().tasks.filter((task) => ['todo', 'in_progress', 'in_review'].includes(task.status)).length
+            } catch {
+              return 0
+            }
+          })(),
         },
       },
     }
@@ -1038,6 +1047,20 @@ export function createHttpApi(options = {}) {
     return { status: 200, headers: {}, body: { ok: true, revision: snapshot.revision, lanes: board.lanes(), tasks: snapshot.tasks } }
   })
 
+  route('GET', '/taskboard/schedule', async () => {
+    const board = require('taskboard')
+    const scheduler = lookup('scheduler')
+    return {
+      status: 200,
+      headers: {},
+      body: {
+        ok: true,
+        entries: board.scheduleList(),
+        scheduler: scheduler !== null && typeof scheduler.stats === 'function' ? scheduler.stats() : null,
+      },
+    }
+  })
+
   route('GET', '/taskboard/task', async ({ query }) => {
     const id = query.text('id')
     if (id === undefined) throw badRequest('id is required')
@@ -1074,6 +1097,24 @@ export function createHttpApi(options = {}) {
     }
     if (action === 'start') {
       return { status: 200, headers: {}, body: { ok: true, ...board.startExecution({ id: text(payload.id), ifVersion: payload.ifVersion }, { sessionId: null }) } }
+    }
+    if (action === 'execute') {
+      // A real run: worktree (when configured) + an agent session.
+      const isolation = text(payload.isolation) ?? String(mcpSettings().taskIsolation ?? 'none')
+      return { status: 200, headers: {}, body: { ok: true, ...(await board.executeTask({ id: text(payload.id), isolation, model: payload.model }, { actor: 'panel' })) } }
+    }
+    if (action === 'cancelRun') {
+      return { status: 200, headers: {}, body: { ok: true, ...(await board.cancelExecution({ id: text(payload.id) })) } }
+    }
+    if (action === 'accept') {
+      // Human acceptance: commit + merge the task branch, then move to done.
+      return { status: 200, headers: {}, body: { ok: true, ...(await board.acceptTask({ id: text(payload.id), ifVersion: payload.ifVersion, merge: payload.merge !== false }, { actor: 'user' })) } }
+    }
+    if (action === 'worktree') {
+      return { status: 200, headers: {}, body: { ok: true, ...(await board.worktreeState({ id: text(payload.id) })) } }
+    }
+    if (action === 'markScheduled') {
+      return { status: 200, headers: {}, body: { ok: true, ...board.markScheduled(text(payload.id), {}) } }
     }
     if (action === 'finish') {
       return { status: 200, headers: {}, body: { ok: true, ...board.finishExecution({ id: text(payload.id), outcome: text(payload.outcome) }, { sessionId: null }) } }

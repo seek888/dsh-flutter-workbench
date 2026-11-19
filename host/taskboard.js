@@ -9,6 +9,8 @@
  * not own here; the tool surface stays the same so agents keep working.
  */
 import { clamp, normalizeError, nowMs, uid } from './util.js'
+import { commitWorktree, createWorktree, mergeWorktree, worktreeStatus } from './worktree.js'
+import { cronMatches, nextCronRun, parseCron } from './cron.js'
 
 /** Statuses, in board order. */
 export const TB_STATUSES = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'canceled', 'archived']
@@ -487,6 +489,293 @@ export function createTaskboard({ store, bus, ctx, logs, settings, logger } = {}
     return { task: summarize(task) }
   }
 
+  /* ------------------------------------------------------- execution runner */
+
+  const runHandles = new Map()
+
+  /** The project directory a task belongs to. */
+  function projectPathOf(task) {
+    const raw = cleanText(task?.workspaceId, 500)
+    return raw === '' ? process.cwd() : raw
+  }
+
+  function buildRunPrompt(task, { projectPath, worktreePath, degraded }) {
+    const lines = [
+      'You are executing one task of the DSH task board.',
+      '',
+      `Task id: ${task.id}`,
+      `Title: ${task.title}`,
+      `Urgency: ${task.urgency}`,
+    ]
+    if (task.description !== '') lines.push('', 'Description:', task.description)
+    if (task.prompt !== '') lines.push('', 'Extra instructions:', task.prompt)
+    lines.push('', `Project: ${projectPath}`)
+    if (worktreePath !== null) {
+      lines.push(`Work in this isolated worktree: ${worktreePath}`, 'Commit your work on that branch; do not touch the main working tree.')
+    } else if (degraded !== null) {
+      lines.push(`(Worktree isolation unavailable: ${degraded}. Work directly in the project directory.)`)
+    }
+    const checklist = task.checklist ?? []
+    if (checklist.length > 0) {
+      lines.push('', 'Acceptance checklist — tick each one with evidence:')
+      for (const item of checklist) lines.push(`- [${item.id}] ${item.text}`)
+    }
+    lines.push(
+      '',
+      'Protocol (follow it exactly):',
+      '1. Read the task first: `taskboard_get` with the id above.',
+      '2. Work, then verify with the flutter_* tools (analyze / test / logs).',
+      '3. Tick the checklist with `taskboard_checklist` (action=check, itemId=..., note=evidence).',
+      '4. Submit `taskboard_execution_report` (summary / changedFiles / checks / risk).',
+      '5. Add a handoff comment with `taskboard_comment_add`.',
+      '6. Move the task to review: `taskboard_move` status=in_review with the CURRENT version.',
+      'Never move a task to done — a human accepts it.',
+    )
+    return lines.join('\n')
+  }
+
+  /**
+   * Start a real execution for a task: optionally create its worktree, spawn the
+   * agent session, record the run and move the card to in_progress.
+   */
+  async function executeTask(input, { actor = 'panel' } = {}) {
+    const task = requireTask(input?.id)
+    if (task.status === 'archived') throw fail('invalid-transition', 'archived tasks are immutable')
+    if ((task.executions ?? []).some((entry) => entry.outcome === 'running')) {
+      throw fail('already-running', `task ${task.id} already has a running execution`)
+    }
+    const agents = (() => {
+      try {
+        return ctx?.get?.('agents') ?? null
+      } catch {
+        return null
+      }
+    })()
+    if (agents === null || typeof agents.create !== 'function') {
+      throw fail('agents-unavailable', 'ctx.get("agents") is unavailable')
+    }
+
+    const settingsValues = (() => {
+      try {
+        return settings?.get?.() ?? {}
+      } catch {
+        return {}
+      }
+    })()
+    const projectPath = projectPathOf(task)
+    const isolation = cleanText(input?.isolation ?? task.isolation ?? '', 20) === 'worktree' ? 'worktree' : 'none'
+    let cwd = projectPath
+    let branch = null
+    let worktreePath = null
+    let degraded = null
+    if (isolation === 'worktree') {
+      const made = await createWorktree({
+        projectPath,
+        taskId: task.id,
+        title: task.title,
+        branch: task.branch ?? '',
+        dataDir: settingsValues.dataDir ?? '',
+      })
+      if (made.ok === true) {
+        cwd = made.path
+        branch = made.branch
+        worktreePath = made.path
+      } else {
+        degraded = made.reason ?? 'worktree unavailable'
+        note(`task ${task.id}: worktree degraded — ${degraded}`, 'warn')
+      }
+    }
+
+    const pinned = normalizeModel(input?.model) ?? task.model ?? null
+    const agentOptions = {}
+    if (pinned !== null && pinned.provider !== '') agentOptions.provider = pinned.provider
+    if (pinned !== null && pinned.model !== '') agentOptions.model = pinned.model
+    if (pinned !== null && pinned.reasoningEffort !== undefined) agentOptions.reasoningEffort = pinned.reasoningEffort
+
+    const sessionId = uid('tb-run')
+    let handle = null
+    try {
+      handle = await agents.create({ sessionId, meta: { cwd }, agentOptions })
+      if (handle?.agent === undefined || handle.agent === null) throw fail('agents-unavailable', 'agents.create returned no agent handle')
+      await handle.agent.followup({ content: [{ type: 'text', text: buildRunPrompt(task, { projectPath, worktreePath, degraded }) }], source: { kind: 'flutter-workbench' } })
+    } catch (error) {
+      if (handle !== null && typeof handle.dispose === 'function') {
+        try {
+          await handle.dispose()
+        } catch {
+          /* ignore */
+        }
+      }
+      const detail = normalizeError(error)
+      note(`task ${task.id}: execution failed to start — ${detail.message}`, 'warn')
+      throw fail('dispatch-failed', `cannot start the execution: ${detail.message}`)
+    }
+    runHandles.set(sessionId, handle)
+
+    const at = nowMs()
+    const run = { id: uid('run'), sessionId, outcome: 'running', startedAt: at, isolation, cwd, worktreePath, branch }
+    task.executions.push(run)
+    task.status = 'in_progress'
+    task.claimedBy = sessionId
+    task.claimAt = at
+    task.version += 1
+    task.updatedAt = at
+    task.updatedBy = actor
+    touch()
+    note(`task ${task.id}: execution started (${isolation}${worktreePath === null ? '' : ` · ${branch}`})`)
+    return { task: summarize(task), sessionId, executionId: run.id, worktreePath, branch, degraded }
+  }
+
+  /** Cancel a running execution and return the card to todo. */
+  async function cancelExecution(input) {
+    const task = requireTask(input?.id)
+    const running = (task.executions ?? []).filter((entry) => entry.outcome === 'running')
+    for (const run of running) {
+      const handle = runHandles.get(run.sessionId)
+      if (handle !== undefined) {
+        runHandles.delete(run.sessionId)
+        try {
+          const agent = handle.agent
+          if (agent !== null && typeof agent.cancel === 'function') agent.cancel({ kind: 'user' }, { keepInbox: true })
+        } catch {
+          /* the session may already be gone */
+        }
+        if (typeof handle.dispose === 'function') {
+          try {
+            await handle.dispose()
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      run.outcome = 'canceled'
+      run.finishedAt = nowMs()
+    }
+    if (running.length > 0) {
+      delete task.claimedBy
+      delete task.claimAt
+      if (task.status === 'in_progress') task.status = 'todo'
+      task.version += 1
+      task.updatedAt = nowMs()
+      touch()
+    }
+    return { task: summarize(task), canceled: running.length }
+  }
+
+  /**
+   * Accept a task: commit what the worktree holds, merge the branch into the
+   * project, then move the card to done as a human action.
+   */
+  async function acceptTask(input, { actor = 'user' } = {}) {
+    const task = requireTask(input?.id)
+    versionGuard(task, input?.ifVersion)
+    const merge = input?.merge !== false
+    const lastRun = [...(task.executions ?? [])].reverse().find((entry) => typeof entry.worktreePath === 'string' && entry.worktreePath !== '')
+    let commitResult = null
+    let mergeResult = null
+    if (lastRun !== undefined) {
+      commitResult = await commitWorktree({ worktreePath: lastRun.worktreePath, message: `task ${task.id}: ${task.title}` })
+      if (merge === true && lastRun.branch !== null && lastRun.branch !== undefined) {
+        mergeResult = await mergeWorktree({ projectPath: projectPathOf(task), branch: lastRun.branch, message: `task ${task.id}: ${task.title}` })
+      }
+    }
+    const moved = move({ id: task.id, status: 'done', ifVersion: task.version }, { actor, actorKind: 'user' })
+    return { ...moved, worktree: { commit: commitResult, merge: mergeResult } }
+  }
+
+  /** Worktree state of a task's latest run (for the review panel). */
+  async function worktreeState(input) {
+    const task = requireTask(input?.id)
+    const lastRun = [...(task.executions ?? [])].reverse().find((entry) => typeof entry.worktreePath === 'string' && entry.worktreePath !== '')
+    if (lastRun === undefined) return { ok: false, reason: 'this task never ran in a worktree' }
+    return { ok: true, branch: lastRun.branch, worktreePath: lastRun.worktreePath, ...(await worktreeStatus({ worktreePath: lastRun.worktreePath })) }
+  }
+
+  /* ------------------------------------------------------------ scheduling */
+
+  /** When this task should run next, or null when it is not scheduled. */
+  function nextScheduledAt(task, fromMs = nowMs()) {
+    const schedule = task?.execution ?? { mode: 'claim' }
+    if (schedule.mode !== 'scheduled') return null
+    if (typeof schedule.runAt === 'string' && schedule.runAt !== '') {
+      const at = parseRunAt(schedule.runAt)
+      return at
+    }
+    if (typeof schedule.cron === 'string' && schedule.cron !== '') {
+      try {
+        // A stored anchor wins (it is what "next run" means after the first fire).
+        const anchor = Number(task.scheduleState?.nextRunAt)
+        if (Number.isFinite(anchor) && anchor > 0) return anchor
+        // No anchor yet: the card is due during a matching minute, otherwise it
+        // waits for the next one. (Computing only the *next* run would never be
+        // due at the matching minute itself.)
+        const minute = Math.floor(fromMs / 60000) * 60000
+        const spec = parseCron(schedule.cron)
+        if (cronMatches(spec, new Date(minute))) return minute
+        return nextCronRun(spec, fromMs)
+      } catch (error) {
+        note(`task ${task.id}: bad cron "${schedule.cron}" — ${normalizeError(error).message}`, 'warn')
+        return null
+      }
+    }
+    return null
+  }
+
+  function parseRunAt(value) {
+    if (/^\d+$/.test(value)) return Number(value)
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  /** Scheduled tasks that are due now (or overdue). */
+  function dueScheduled(now = nowMs()) {
+    const out = []
+    for (const task of ledger.tasks) {
+      if (task.trashedAt !== undefined) continue
+      if (['archived', 'canceled', 'done', 'in_progress'].includes(task.status)) continue
+      const at = nextScheduledAt(task, now)
+      if (at === null || at > now) continue
+      out.push({ id: task.id, title: task.title, dueAt: at, mode: task.status })
+    }
+    return out
+  }
+
+  /** Record that a scheduled run fired; recompute the next anchor. */
+  function markScheduled(id, { lastRunAt = nowMs(), nextRunAt = null } = {}) {
+    const task = requireTask(id)
+    const schedule = task.execution ?? { mode: 'claim' }
+    const at = nowMs()
+    const anchor = nextRunAt !== null
+      ? Number(nextRunAt)
+      : typeof schedule.cron === 'string' && schedule.cron !== ''
+        ? nextCronRun(schedule.cron, lastRunAt)
+        : null
+    task.scheduleState = { lastRunAt, nextRunAt: anchor }
+    if (anchor === null && schedule.mode === 'scheduled') {
+      // A one-shot run never fires twice.
+      task.execution = { mode: 'claim' }
+    }
+    task.version += 1
+    task.updatedAt = at
+    touch()
+    return { task: summarize(task), nextRunAt: anchor }
+  }
+
+  /** Scheduled tasks with their next fire time, for the panel. */
+  function scheduleList(now = nowMs()) {
+    return ledger.tasks
+      .filter((task) => task.trashedAt === undefined && (task.execution ?? {}).mode === 'scheduled')
+      .map((task) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        cron: task.execution.cron ?? null,
+        runAt: task.execution.runAt ?? null,
+        lastRunAt: task.scheduleState?.lastRunAt ?? null,
+        nextRunAt: nextScheduledAt(task, now),
+      }))
+  }
+
   function lanes() {
     return TB_LANES.map((lane) => ({ ...lane, count: ledger.tasks.filter((task) => task.status === lane.id && task.trashedAt === undefined).length }))
   }
@@ -516,6 +805,14 @@ export function createTaskboard({ store, bus, ctx, logs, settings, logger } = {}
     executionReport,
     startExecution,
     finishExecution,
+    executeTask,
+    cancelExecution,
+    acceptTask,
+    worktreeState,
+    dueScheduled,
+    markScheduled,
+    scheduleList,
+    nextScheduledAt,
     // lifecycle
     dispose,
     // constants for callers
