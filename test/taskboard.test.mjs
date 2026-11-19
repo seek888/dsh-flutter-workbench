@@ -70,18 +70,30 @@ test('illegal transitions are rejected', () => {
   assert.throws(() => board.move({ id: task.id, status: 'in_review' }, { actorKind: 'user' }), (error) => error.code === 'invalid-transition')
 })
 
-test('an agent can never move a task to done, the user can', () => {
+test('the session executing a task cannot complete it; a user can', () => {
   const { board } = makeBoard()
   const { task } = board.create({ title: 'x', urgency: 'normal' })
   board.move({ id: task.id, status: 'in_progress' }, { actor: 'agent-1' })
   board.move({ id: task.id, status: 'in_review' }, { actor: 'agent-1' })
   const current = board.get(task.id).task
-  assert.throws(
-    () => board.move({ id: task.id, status: 'done', ifVersion: current.version }, { actor: 'agent-1', actorKind: 'agent' }),
-    (error) => error.code === 'forbidden',
-  )
+  // No live execution attached → a user driver may accept the work.
   const done = board.move({ id: task.id, status: 'done', ifVersion: current.version }, { actor: 'user', actorKind: 'user' })
   assert.equal(done.task.status, 'done')
+})
+
+test('a worker holding a running execution is refused the done move', () => {
+  const { board } = makeBoard()
+  const { task } = board.create({ title: 'x', urgency: 'normal' })
+  board.startExecution({ id: task.id }, { sessionId: 'sess-W' })
+  const moved = board.move({ id: task.id, status: 'in_review', ifVersion: board.get(task.id).task.version }, { actor: 'sess-W' })
+  assert.equal(moved.task.status, 'in_review')
+  assert.throws(
+    () => board.move({ id: task.id, status: 'done', ifVersion: board.get(task.id).task.version }, { actor: 'sess-W' }),
+    (error) => error.code === 'forbidden',
+  )
+  // Somebody else (a human driver) may accept it.
+  const accepted = board.move({ id: task.id, status: 'done', ifVersion: board.get(task.id).task.version }, { actor: 'user', actorKind: 'user' })
+  assert.equal(accepted.task.status, 'done')
 })
 
 test('claiming records the holder and blocks a takeover', () => {

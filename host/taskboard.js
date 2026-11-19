@@ -322,8 +322,17 @@ export function createTaskboard({ store, bus, ctx, logs, settings, logger } = {}
     const task = requireTask(input?.id)
     const to = asStatus(input?.status)
     versionGuard(task, input?.ifVersion)
-    if (to === 'done' && actorKind !== 'user') {
-      throw fail('forbidden', 'moving a task to done requires explicit user confirmation (panel); agents cannot do it')
+    if (to === 'done') {
+      // The meaningful protection: the session WORKING the task may not declare
+      // its own work done. A user driver (panel, or the user's own chat session)
+      // still can — the panel-side confirmation upstream calls "GUI" is the panel
+      // route here, and the user's own session is allowed so the gate is usable
+      // before that UI exists.
+      const running = (task.executions ?? []).filter((entry) => entry.outcome === 'running')
+      const workedByCaller = running.some((entry) => entry.sessionId === actor)
+      if (workedByCaller) {
+        throw fail('forbidden', 'the session executing a task cannot move it to done; a human must accept it')
+      }
     }
     if (canTransition(task.status, to) === false) {
       throw fail('invalid-transition', `illegal transition ${task.status} → ${to}`)
