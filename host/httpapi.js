@@ -34,6 +34,20 @@ export const MCP_PATH = `${ROUTE_PREFIX}/mcp`
  * aliased one rewrites to {@link ROUTE_PREFIX} on arrival.
  */
 export const ALT_PREFIX = '/flutter-workbench'
+
+/**
+ * Rewrite the alias ingress onto the real prefix.
+ * `/flutter-workbench/mcp` → `/api/flutter-workbench/mcp`; every other path is
+ * returned unchanged, so the alias can never shadow a shipped route.
+ * @param {string} pathname request path.
+ * @returns {string} the path the router should see.
+ */
+export function resolveAliasPath(pathname) {
+  const value = String(pathname ?? '')
+  if (value === ALT_PREFIX) return ROUTE_PREFIX
+  if (value.startsWith(`${ALT_PREFIX}/`)) return `${ROUTE_PREFIX}${value.slice(ALT_PREFIX.length)}`
+  return value
+}
 /** Largest accepted JSON request body. */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024
 /** Toolchain jobs kept in memory (newest win). */
@@ -87,6 +101,8 @@ const STATUS_BY_CODE = {
 export function createHttpApi(options = {}) {
   const services = options.services ?? {}
   const logger = options.logger
+  /** The plugin context: `webServer` and `connection` only exist there. */
+  const baseCtx = options.ctx ?? null
   const startedAt = nowMs()
   /** @type {Map<string, any>} */
   const jobs = new Map()
@@ -95,10 +111,25 @@ export function createHttpApi(options = {}) {
 
   // ---------------------------------------------------------------- services
 
-  /** Read a service without throwing. */
+  /** Read a service without throwing; falls back to the plugin context. */
   function lookup(name) {
-    const value = services === null || services === undefined ? undefined : services[name]
-    return value === undefined || value === null ? null : value
+    const fromServices = services === null || services === undefined ? undefined : services[name]
+    if (fromServices !== undefined && fromServices !== null) return fromServices
+    try {
+      const fromCtx = typeof baseCtx?.get === 'function' ? baseCtx.get(name) : undefined
+      return fromCtx ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** The DSH connection fence verdict for one request, or null to allow it. */
+  function fenceVerdict(headers) {
+    const connection = lookup('connection')
+    // Fail closed: a raw prefix route bypasses the host's own `/api` fence.
+    if (connection === null || typeof connection.requestRejection !== 'function') return 403
+    const rejection = connection.requestRejection({ headers })
+    return rejection === undefined || rejection === null ? null : rejection
   }
 
   /** Read a service that a route cannot work without. */
@@ -1078,6 +1109,22 @@ export function createHttpApi(options = {}) {
     const query = createQuery(input?.query)
     const headers = isPlainObject(input?.headers) ? input.headers : {}
     const rawBody = input?.body
+    // Every non-MCP path is a panel/browser path, so it answers to the host
+    // fence. `/mcp` authenticates with the plugin token instead (below).
+    if (id !== '/mcp') {
+      const verdict = fenceVerdict(headers)
+      if (verdict !== null) {
+        return {
+          status: verdict,
+          headers: {},
+          body: {
+            ok: false,
+            code: verdict === 401 ? 'unauthenticated' : 'forbidden',
+            message: verdict === 401 ? 'DSH 登录已失效：请重新打开 dsh web 启动时打印的网址。' : '请求来源不受信任，已拒绝。',
+          },
+        }
+      }
+    }
     try {
       if (id === '/mcp') return await handleMcp({ method, query, headers, body: rawBody })
       const run = routes.get(`${method} ${id}`)
@@ -1103,22 +1150,13 @@ export function createHttpApi(options = {}) {
   async function handler(request, response) {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
-      // Alias ingress: rewrite `/flutter-workbench/...` onto the real prefix so
-      // both registrations share one router.
-      if (url.pathname === ALT_PREFIX || url.pathname.startsWith(`${ALT_PREFIX}/`)) {
-        const rest = url.pathname.slice(ALT_PREFIX.length)
-        url.pathname = rest === '' ? ROUTE_PREFIX : `${ROUTE_PREFIX}${rest}`
-      }
+      url.pathname = resolveAliasPath(url.pathname)
       const id = routeId(url.pathname)
       const isMcp = id === '/mcp'
 
       if (isMcp === false) {
-        const connection = typeof baseCtx?.get === 'function' ? baseCtx.get('connection') : undefined
-        // Fail closed: a raw prefix route bypasses the host's `/api` fence.
-        const rejection = typeof connection?.requestRejection === 'function'
-          ? connection.requestRejection({ headers: request.headers })
-          : 403
-        if (rejection !== undefined && rejection !== null) {
+        const rejection = fenceVerdict(request.headers)
+        if (rejection !== null) {
           sendJson(response, rejection, {
             ok: false,
             code: rejection === 401 ? 'unauthenticated' : 'forbidden',
