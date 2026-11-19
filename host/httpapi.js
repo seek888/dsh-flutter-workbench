@@ -1050,6 +1050,7 @@ export function createHttpApi(options = {}) {
   route('GET', '/taskboard/schedule', async () => {
     const board = require('taskboard')
     const scheduler = lookup('scheduler')
+    const queue = lookup('queue')
     return {
       status: 200,
       headers: {},
@@ -1057,8 +1058,30 @@ export function createHttpApi(options = {}) {
         ok: true,
         entries: board.scheduleList(),
         scheduler: scheduler !== null && typeof scheduler.stats === 'function' ? scheduler.stats() : null,
+        queue: queue !== null && typeof queue.stats === 'function' ? queue.stats() : null,
       },
     }
+  })
+
+  route('POST', '/taskboard/queue', async ({ body }) => {
+    const queue = lookup('queue')
+    if (queue === null || typeof queue.enqueue !== 'function') {
+      return { status: 200, headers: {}, body: { ok: false, code: 'unavailable', message: '执行队列不可用' } }
+    }
+    const payload = isPlainObject(body) ? body : {}
+    const action = text(payload.action) ?? 'stats'
+    if (action === 'stats') {
+      return { status: 200, headers: {}, body: { ok: true, queue: queue.stats() } }
+    }
+    if (action === 'cancel') {
+      const result = queue.cancel(String(payload.id ?? ''))
+      return { status: 200, headers: {}, body: { ok: true, ...result, queue: queue.stats() } }
+    }
+    if (action === 'capacity') {
+      const capacity = queue.setCapacity(Number(payload.maxConcurrent ?? 2))
+      return { status: 200, headers: {}, body: { ok: true, maxConcurrent: capacity, queue: queue.stats() } }
+    }
+    throw badRequest(`unknown queue action ${action}`)
   })
 
   route('GET', '/taskboard/task', async ({ query }) => {
@@ -1099,9 +1122,26 @@ export function createHttpApi(options = {}) {
       return { status: 200, headers: {}, body: { ok: true, ...board.startExecution({ id: text(payload.id), ifVersion: payload.ifVersion }, { sessionId: null }) } }
     }
     if (action === 'execute') {
-      // A real run: worktree (when configured) + an agent session.
+      // A real run: worktree (when configured) + an agent session, always through
+      // the queue. The panel is told whether it started now or is waiting.
       const isolation = text(payload.isolation) ?? String(mcpSettings().taskIsolation ?? 'none')
-      return { status: 200, headers: {}, body: { ok: true, ...(await board.executeTask({ id: text(payload.id), isolation, model: payload.model }, { actor: 'panel' })) } }
+      const queue = lookup('queue')
+      if (queue === null || typeof queue.enqueue !== 'function') {
+        const started = await board.executeTask({ id: text(payload.id), isolation, model: payload.model }, { actor: 'panel' })
+        return { status: 200, headers: {}, body: { ok: true, queued: false, ...started } }
+      }
+      const task = board.get(text(payload.id)).task
+      const queued = queue.enqueue({ taskId: task.id, label: task.title, priority: task.urgency, meta: { actor: 'panel', isolation } })
+      if (queued.accepted !== true) {
+        // Already queued or already running — report, never start a second run.
+        const reason = queued.reason === 'running' ? 'already-running' : queued.reason === 'queued' ? 'already-queued' : String(queued.reason ?? 'not-queued')
+        return { status: 409, headers: {}, body: { ok: false, code: reason, message: reason === 'already-running' ? '该任务正在执行' : '该任务已在队列中', queue: queue.stats() } }
+      }
+      return {
+        status: 200,
+        headers: {},
+        body: { ok: true, queued: queued.position > 0, position: queued.position, queue: queue.stats() },
+      }
     }
     if (action === 'cancelRun') {
       return { status: 200, headers: {}, body: { ok: true, ...(await board.cancelExecution({ id: text(payload.id) })) } }

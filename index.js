@@ -19,6 +19,7 @@ import { createStore } from './host/store.js'
 import { createToolchain } from './host/analyze.js'
 import { createTaskboard } from './host/taskboard.js'
 import { createScheduler } from './host/scheduler.js'
+import { createRunQueue } from './host/queue.js'
 import { registerTools } from './host/tools.js'
 import { createVmService } from './host/vmservice.js'
 import { createBus, createLogger, normalizeError, nowMs } from './host/util.js'
@@ -82,6 +83,20 @@ export function apply(ctx, config) {
     // The task board: a port of dsh-taskboard's ledger, so this one plugin owns
     // both the Flutter toolchain and the agent task board.
     const taskboard = await build('taskboard', () => createTaskboard({ store, bus, ctx, logs, settings, logger }))
+    // One queue bounds how many task executions run at once; the scheduler hands
+    // due cards to it instead of running them inline.
+    const queue = await build('queue', () => createRunQueue({
+      maxConcurrent: Number(resolved.maxTaskConcurrency ?? 2),
+      logger,
+      run: (item) => taskboard.executeTask({ id: item.taskId, isolation: item.meta?.isolation ?? 'worktree' }, { actor: item.meta?.actor ?? 'queue' }),
+      onEvent: (type, payload) => {
+        try {
+          bus.emit(`queue:${type}`, payload)
+        } catch {
+          /* listeners must not break the queue */
+        }
+      },
+    }))
     // Host-side timer: scheduled cards fire with the browser closed.
     const scheduler = await build('scheduler', () => {
       const created = createScheduler({
@@ -90,6 +105,12 @@ export function apply(ctx, config) {
         bus,
         logger,
         intervalMs: Number(resolved.schedulerIntervalMs ?? 20000),
+        enqueue: (item) => queue?.enqueue({
+          taskId: item.id,
+          label: item.title,
+          priority: item.priority ?? 'normal',
+          meta: { actor: 'scheduler', isolation: 'worktree' },
+        }),
         execute: (id) => taskboard.executeTask({ id, isolation: 'worktree' }, { actor: 'scheduler' }),
       })
       if (resolved.schedulerEnabled !== false) created.start()
@@ -111,6 +132,7 @@ export function apply(ctx, config) {
       board,
       toolchain,
       taskboard,
+      queue,
       scheduler,
       version: VERSION,
       bootedAt,
@@ -193,6 +215,11 @@ export function apply(ctx, config) {
         scheduler?.dispose?.()
       } catch {
         /* timer teardown is best effort */
+      }
+      try {
+        queue?.dispose?.()
+      } catch {
+        /* queue teardown is best effort */
       }
       await store?.flush?.().catch?.(() => {})
     }

@@ -21,7 +21,7 @@ export const SETTING_SPEC = {
   defaultModel: { type: 'string', default: '', label: 'AI model', hint: '看板派发任务使用；留空用 DSH 默认' },
   autoRefreshMs: { type: 'number', default: 2000, label: '面板刷新间隔（毫秒）' },
   networkAutoRefreshMs: { type: 'number', default: 1500, label: '网络日志拉取间隔（毫秒）' },
-  maxTaskConcurrency: { type: 'number', default: 1, label: '同时执行的看板任务数' },
+  maxTaskConcurrency: { type: 'number', default: 2, label: '同时执行的任务数', hint: '执行队列的并发上限（1-8）' },
   analysisEnabled: { type: 'boolean', default: true, label: '自动分析保存后的错误' },
   mcpEnabled: { type: 'boolean', default: true, label: '启用 MCP 接口' },
   schedulerEnabled: { type: 'boolean', default: true, label: '启用看板定时器', hint: '关闭后 cron/定时任务不再触发' },

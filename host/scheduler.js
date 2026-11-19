@@ -13,13 +13,14 @@ const DEFAULT_INTERVAL_MS = 20000
 /**
  * @param {{ taskboard: any, logs?: any, bus?: any, logger?: any,
  *           intervalMs?: number, execute?: (taskId: string) => Promise<any>,
+ *           enqueue?: (item: { id: string, title: string, priority?: string }) => any,
  *           now?: () => number }} deps
  */
-export function createScheduler({ taskboard, logs, bus, logger, intervalMs = DEFAULT_INTERVAL_MS, execute, now = nowMs } = {}) {
+export function createScheduler({ taskboard, logs, bus, logger, intervalMs = DEFAULT_INTERVAL_MS, execute, enqueue, now = nowMs } = {}) {
   const tickMs = Number.isFinite(Number(intervalMs)) ? Math.max(2000, Number(intervalMs)) : DEFAULT_INTERVAL_MS
   let timer = null
   let ticking = false
-  const stats = { ticks: 0, fired: 0, failures: 0, lastTickAt: null, lastError: null }
+  const stats = { ticks: 0, fired: 0, enqueued: 0, failures: 0, lastTickAt: null, lastError: null }
 
   function note(level, text) {
     try {
@@ -42,6 +43,16 @@ export function createScheduler({ taskboard, logs, bus, logger, intervalMs = DEF
       const due = taskboard.dueScheduled(now())
       for (const item of due) {
         try {
+          if (typeof enqueue === 'function') {
+            // The queue owns concurrency: hand the card over and move the anchor
+            // immediately so the next tick cannot fire it a second time.
+            const queued = enqueue({ id: item.id, title: item.title })
+            taskboard.markScheduled(item.id, { lastRunAt: now() })
+            stats.enqueued += 1
+            fired.push({ id: item.id, queued: queued ?? null })
+            note('info', `queued ${item.id} (${item.title})`)
+            continue
+          }
           const result = await execute(item.id)
           fired.push({ id: item.id, ...result })
           stats.fired += 1

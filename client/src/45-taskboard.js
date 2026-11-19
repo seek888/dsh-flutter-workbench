@@ -35,7 +35,7 @@ async function tbCall(body) {
 
 /* ------------------------------------------------------------------ card */
 
-function TbCard({ task, busy, onOpen, onDragStart, onDragEnd, dragged }) {
+function TbCard({ task, busy, queued, onOpen, onDragStart, onDragEnd, dragged }) {
   const urgency = tbUrgency(task.urgency)
   const done = Number(task.checklistDone ?? 0)
   const total = Number(task.checklistTotal ?? 0)
@@ -63,6 +63,7 @@ function TbCard({ task, busy, onOpen, onDragStart, onDragEnd, dragged }) {
       total > 0 ? h(Pill, { tone: done === total ? 'ok' : 'neutral', style: { fontSize: 10 } }, `${done}/${total}`) : null,
       task.blocked === true ? h(Pill, { tone: 'error', style: { fontSize: 10 } }, t('tb.blocked')) : null,
       task.claimedBy === null || task.claimedBy === undefined ? null : h(Pill, { tone: 'warn', style: { fontSize: 10 } }, t('tb.claimed')),
+      queued === true ? h(Pill, { tone: 'neutral', style: { fontSize: 10 } }, t('tb.queue')) : null,
       h('div', { style: { flex: 1 } }),
       h('span', { style: { color: T.textFaint, fontSize: 10, fontFamily: T.mono } }, `v${task.version}`)))
 }
@@ -167,7 +168,14 @@ function TbTaskModal({ task, settings, onClose, onChanged, push }) {
     setForm((prev) => ({ ...prev, comment: '' }))
   })
 
-  const run = () => act('execute', { isolation: form.isolation })
+  const run = () => guard(async () => {
+    const response = await tbCall({ action: 'execute', id: detail.id, isolation: form.isolation })
+    if (response?.queued === true) {
+      push(t('tb.queuedAt', { n: response.position ?? '?' }), 'warn')
+      return
+    }
+    push(t('tb.execute'), 'ok')
+  })
   const accept = () => act('accept', { merge: form.merge === true })
   const remove = () => guard(async () => {
     await tbCall({ action: 'delete', id: detail.id })
@@ -363,6 +371,11 @@ function TaskboardPage({ state, actions }) {
   }
 
   const scheduleEntries = Array.isArray(schedule?.entries) ? schedule.entries : []
+  const queue = schedule?.queue ?? null
+  const queueRunning = Array.isArray(queue?.running) ? queue.running.length : 0
+  const queueWaiting = Array.isArray(queue?.queued) ? queue.queued.length : 0
+  const queueCap = Number(queue?.maxConcurrent ?? 0)
+  const queuedIds = new Set((Array.isArray(queue?.queued) ? queue.queued : []).map((item) => item.taskId))
 
   const header = h('div', {
     style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '6px 10px', borderBottom: `1px solid ${T.border}`, flexShrink: 0 },
@@ -373,6 +386,8 @@ function TaskboardPage({ state, actions }) {
     schedule?.scheduler?.running === true
       ? h(Pill, { tone: 'ok', style: { fontSize: 10 } }, `${t('tb.schedulerOn')} · ${scheduleEntries.length}`)
       : h(Pill, { tone: 'neutral', style: { fontSize: 10 } }, t('tb.schedulerOff')),
+    h(Pill, { tone: queueRunning > 0 ? 'warn' : 'neutral', style: { fontSize: 10 } },
+      t('tb.queueBusy', { run: queueRunning, cap: queueCap, wait: queueWaiting })),
     h(Btn, { onClick: () => setEditing({ task: null }) }, t('tb.new')),
     h(Btn, { onClick: () => refresh() }, t('common.refresh')))
 
@@ -412,6 +427,7 @@ function TaskboardPage({ state, actions }) {
           key: task.id,
           task,
           busy: busyIds[task.id] === true,
+          queued: queuedIds.has(task.id),
           dragged: dragged === task.id,
           onOpen: (item) => setEditing({ task: item }),
           onDragStart: (id) => setDragged(id),
