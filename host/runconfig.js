@@ -542,10 +542,12 @@ export function devicePlatform(targetPlatform, fallback = '') {
  *          `null` means "not a JSON array" so the caller can fall back.
  */
 export function parseDevicesMachine(text) {
-  const trimmed = String(text ?? '').trim()
-  if (trimmed === '') return null
-  const parsed = safeJson(trimmed, undefined)
-  if (!Array.isArray(parsed)) return null
+  const raw = String(text ?? '')
+  if (raw.trim() === '') return null
+  // `flutter devices --machine` can print a mirror notice ("Flutter assets will
+  // be downloaded from …") before the JSON, so never parse the whole blob.
+  const parsed = firstJsonArray(raw)
+  if (parsed === null) return null
   return parsed
     .filter((item) => item !== null && typeof item === 'object' && item.id !== undefined)
     .map((item) => ({
@@ -555,7 +557,21 @@ export function parseDevicesMachine(text) {
       emulator: item.emulator === true,
       supported: item.isSupported !== false,
       targetPlatform: optionalString(item.targetPlatform),
+      sdk: optionalString(item.sdk),
+      capabilities: item.capabilities !== null && typeof item.capabilities === 'object' ? item.capabilities : null,
     }))
+}
+
+/** The first JSON array found in mixed output, or null. */
+export function firstJsonArray(text) {
+  const raw = String(text ?? '')
+  const direct = safeJson(raw.trim(), undefined)
+  if (Array.isArray(direct)) return direct
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start === -1 || end <= start) return null
+  const sliced = safeJson(raw.slice(start, end + 1), undefined)
+  return Array.isArray(sliced) ? sliced : null
 }
 
 /**
@@ -645,7 +661,14 @@ export function parseEmulatorsMachine(text) {
 /* Binary resolution + child-process helpers (shared by runner/analyze) */
 /* ------------------------------------------------------------------ */
 
-const WINDOWS_EXTENSIONS = ['', '.bat', '.cmd', '.exe']
+/**
+ * Windows probe order for a tool name. `.bat`/`.cmd`/`.exe` must come FIRST:
+ * the Flutter SDK ships an extension-less `bin/flutter` shell script next to
+ * `bin/flutter.bat`, and spawning the extension-less one fails with ENOENT
+ * ("spawn ...\bin\flutter ENOENT") — the exact symptom that emptied the device
+ * list and broke `flutter run`.
+ */
+const WINDOWS_EXTENSIONS = ['.bat', '.cmd', '.exe', '']
 
 /**
  * Resolve a tool binary from an explicit setting, then from PATH.
@@ -672,7 +695,16 @@ export function resolveBinaryPath({
   if (binary === '') return null
   const configuredText = String(configured ?? '').trim().replace(/^"(.*)"$/, '$1')
   if (configuredText !== '') {
-    if (fileExists(configuredText)) return { path: configuredText, source: 'config' }
+    if (fileExists(configuredText)) {
+      // An explicitly configured extension-less path (the SDK's bash `flutter`)
+      // is not spawnable on Windows; prefer its .bat sibling when it exists.
+      if (platform === 'win32' && /\.[a-z0-9]+$/i.test(configuredText) === false) {
+        for (const extension of ['.bat', '.cmd', '.exe']) {
+          if (fileExists(configuredText + extension)) return { path: configuredText + extension, source: 'config' }
+        }
+      }
+      return { path: configuredText, source: 'config' }
+    }
     if (dirExists(configuredText)) {
       const found = firstExisting(binaryCandidates(configuredText, binary, platform), fileExists)
       if (found !== null) return { path: found, source: 'config' }
@@ -738,12 +770,27 @@ export function quoteWindowsArg(value) {
 export function buildSpawnSpec(file, args = []) {
   const isWindows = process.platform === 'win32'
   const list = args.map((item) => String(item))
-  const needsShell = isWindows && (/\.(bat|cmd)$/i.test(file) || !/[\\/]/.test(file))
+  const resolved = isWindows ? resolveSpawnExecutable(String(file)) : String(file)
+  const needsShell = isWindows && (/\.(bat|cmd)$/i.test(resolved) || !/[\\/]/.test(resolved))
   if (!needsShell) {
-    return { file, args: list, options: { shell: false, windowsHide: true } }
+    return { file: resolved, args: list, options: { shell: false, windowsHide: true } }
   }
-  const command = [quoteWindowsArg(file), ...list.map(quoteWindowsArg)].join(' ')
+  const command = [quoteWindowsArg(resolved), ...list.map(quoteWindowsArg)].join(' ')
   return { file: command, args: [], options: { shell: true, windowsHide: true } }
+}
+
+/**
+ * Windows: a path with a separator and no extension is not spawnable (the
+ * Flutter SDK ships such a script next to `flutter.bat`), so probe the real
+ * executables. Returns the input unchanged when nothing matches.
+ */
+export function resolveSpawnExecutable(file) {
+  if (/[\\/]/.test(file) === false) return file
+  if (/\.[a-z0-9]+$/i.test(file)) return file
+  for (const extension of ['.bat', '.cmd', '.exe']) {
+    if (existsSync(file + extension)) return file + extension
+  }
+  return file
 }
 
 /**

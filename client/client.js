@@ -315,6 +315,8 @@ const ZH = {
   'runtime.configManual': '手动配置',
   'runtime.device': '设备',
   'runtime.deviceRefresh': '刷新设备',
+  'runtime.deviceEmulator': '模拟器',
+  'runtime.deviceUnsupported': '不支持',
   'runtime.mode': '模式',
   'runtime.flavor': 'Flavor',
   'runtime.flavorHint': '可选，例如 dev / prod',
@@ -778,6 +780,8 @@ const EN = {
   'runtime.configManual': 'Manual configuration',
   'runtime.device': 'Device',
   'runtime.deviceRefresh': 'Refresh devices',
+  'runtime.deviceEmulator': 'emulator',
+  'runtime.deviceUnsupported': 'unsupported',
   'runtime.mode': 'Mode',
   'runtime.flavor': 'Flavor',
   'runtime.flavorHint': 'optional, e.g. dev / prod',
@@ -3914,10 +3918,22 @@ function RuntimePage({ state: sharedState, actions: sharedActions }) {
     a.setDraft?.({ args: text })
   }
 
-  const deviceOptions = devices.map((device) => ({
-    value: device.id,
-    label: `${device.name ?? device.id}${device.platform === undefined ? '' : ` · ${device.platform}`}${device.emulator === true ? ' · emu' : ''}`,
-  }))
+  const deviceOptions = devices.map((device) => {
+    const name = String(device?.name ?? device?.id ?? '')
+    const platform = String(device?.targetPlatform ?? device?.platform ?? '')
+    const badges = [
+      platform === '' ? null : platform,
+      device?.emulator === true ? t('runtime.deviceEmulator') : null,
+      device?.supported === false ? t('runtime.deviceUnsupported') : null,
+    ].filter((item) => item !== null)
+    const label = badges.length === 0 ? name : `${name} · ${badges.join(' · ')}`
+    return {
+      value: device.id,
+      label,
+      // Full identity in the tooltip: the SDK line identifies two same-named devices.
+      title: String(device?.sdk ?? ''),
+    }
+  })
 
   const vmUri = activeRun?.vmServiceUri ?? null
   const devtoolsUrl = activeRun?.devtoolsUrl !== null && activeRun?.devtoolsUrl !== undefined

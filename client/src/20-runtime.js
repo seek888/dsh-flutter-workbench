@@ -756,10 +756,22 @@ function RuntimePage({ state: sharedState, actions: sharedActions }) {
     a.setDraft?.({ args: text })
   }
 
-  const deviceOptions = devices.map((device) => ({
-    value: device.id,
-    label: `${device.name ?? device.id}${device.platform === undefined ? '' : ` · ${device.platform}`}${device.emulator === true ? ' · emu' : ''}`,
-  }))
+  const deviceOptions = devices.map((device) => {
+    const name = String(device?.name ?? device?.id ?? '')
+    const platform = String(device?.targetPlatform ?? device?.platform ?? '')
+    const badges = [
+      platform === '' ? null : platform,
+      device?.emulator === true ? t('runtime.deviceEmulator') : null,
+      device?.supported === false ? t('runtime.deviceUnsupported') : null,
+    ].filter((item) => item !== null)
+    const label = badges.length === 0 ? name : `${name} · ${badges.join(' · ')}`
+    return {
+      value: device.id,
+      label,
+      // Full identity in the tooltip: the SDK line identifies two same-named devices.
+      title: String(device?.sdk ?? ''),
+    }
+  })
 
   const vmUri = activeRun?.vmServiceUri ?? null
   const devtoolsUrl = activeRun?.devtoolsUrl !== null && activeRun?.devtoolsUrl !== undefined

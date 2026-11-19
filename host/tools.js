@@ -201,7 +201,21 @@ export function createToolDefinitions({ services, logger } = {}) {
     },
     output: {
       schema: looseSchema({ devices: { type: 'array', items: { type: 'object' } } }),
-      render: (args, value) => text((value?.devices ?? []).map((d) => `${d.id} · ${d.name} · ${d.platform}${d.emulator ? ' (模拟器)' : ''}`).join('\n') || '没有可用设备'),
+      render: (args, value) => {
+        const devices = value?.devices ?? []
+        if (devices.length === 0) {
+          return text('没有可用设备。请确认 Flutter SDK 路径正确（设置里的 flutterPath），或先启动模拟器。')
+        }
+        return text(devices.map((device) => {
+          const platform = String(device?.targetPlatform ?? device?.platform ?? '?')
+          const notes = [
+            device?.emulator === true ? '模拟器' : null,
+            device?.supported === false ? '不支持' : null,
+          ].filter((item) => item !== null)
+          const sdk = typeof device?.sdk === 'string' && device.sdk !== '' ? ` · ${device.sdk}` : ''
+          return `${device.id} · ${device.name} · ${platform}${notes.length > 0 ? ` (${notes.join(',')})` : ''}${sdk}`
+        }).join('\n'))
+      },
     },
     async execute(args) {
       const tool = requireService(toolchain, 'toolchain')
