@@ -25,6 +25,15 @@ import { normalizeError, nowMs, readBody, safeJson, sendJson, uid } from './util
 export const ROUTE_PREFIX = '/api/flutter-workbench'
 /** MCP JSON-RPC endpoint (inside {@link ROUTE_PREFIX}). */
 export const MCP_PATH = `${ROUTE_PREFIX}/mcp`
+
+/**
+ * Alias root that sits OUTSIDE `/api`. The Desktop web carrier fences every
+ * `/api/*` request with a DSH login cookie before any plugin route sees it, so a
+ * cookie-less external MCP client (VS Code, Cursor, Claude Code) can only reach
+ * this plugin through a non-`/api` path. Both paths run the same handler; the
+ * aliased one rewrites to {@link ROUTE_PREFIX} on arrival.
+ */
+export const ALT_PREFIX = '/flutter-workbench'
 /** Largest accepted JSON request body. */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024
 /** Toolchain jobs kept in memory (newest win). */
@@ -1094,6 +1103,12 @@ export function createHttpApi(options = {}) {
   async function handler(request, response) {
     try {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+      // Alias ingress: rewrite `/flutter-workbench/...` onto the real prefix so
+      // both registrations share one router.
+      if (url.pathname === ALT_PREFIX || url.pathname.startsWith(`${ALT_PREFIX}/`)) {
+        const rest = url.pathname.slice(ALT_PREFIX.length)
+        url.pathname = rest === '' ? ROUTE_PREFIX : `${ROUTE_PREFIX}${rest}`
+      }
       const id = routeId(url.pathname)
       const isMcp = id === '/mcp'
 
@@ -1188,12 +1203,21 @@ export function createHttpApi(options = {}) {
       return () => {}
     }
     const unregister = server.register({ kind: 'prefix', path: ROUTE_PREFIX, handler })
+    // Second ingress outside `/api`: the DSH web carrier fences every `/api/*`
+    // request with a login cookie, so cookie-less MCP clients only reach us here.
+    let unregisterAlias = null
+    try {
+      unregisterAlias = server.register({ kind: 'prefix', path: ALT_PREFIX, handler })
+    } catch (aliasError) {
+      logger?.warn?.(`httpapi: alias route unavailable: ${normalizeError(aliasError).message}`)
+    }
     let disposed = false
     const disposer = () => {
       if (disposed) return
       disposed = true
       activeDisposer = null
       try {
+        if (typeof unregisterAlias === 'function') unregisterAlias()
         if (typeof unregister === 'function') unregister()
       } catch (error) {
         logger?.warn?.(`httpapi: route removal failed: ${normalizeError(error).message}`)
@@ -1216,5 +1240,5 @@ export function createHttpApi(options = {}) {
     }
   }
 
-  return { handle, attach, dispose, ROUTE_PREFIX, MCP_PATH }
+  return { handle, attach, dispose, ROUTE_PREFIX, MCP_PATH, ALT_PREFIX }
 }
