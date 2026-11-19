@@ -11,3 +11,6 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+# Flutter tool leftovers from local verification
+.flutter
+.flutter_tool_state
